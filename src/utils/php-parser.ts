@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type * as PhpParserTypes from 'php-parser';
 import { readFileSafe } from './file.js';
 import { mapPhpTypeToTs } from './type-mapper.js';
 
 // Import php-parser (CommonJS module with constructor)
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+const require = createRequire(import.meta.url);
 const PhpParser = require('php-parser') as new (options?: object) => PhpParserTypes.Engine;
 
 // Initialize the PHP parser (PHP 8+ only)
