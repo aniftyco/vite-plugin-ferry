@@ -71,13 +71,36 @@ function inferTypeFromValue(
 ): FieldInfo {
   let optional = false;
 
-  // Resource::collection
-  const collMatch = value.match(/([A-Za-z0-9_]+)::collection\s*\(\s*(.*?)\s*\)/);
+  // Resource collection: Resource::collection(...) or Resource::make(...)
+  const collMatch = value.match(/([A-Za-z0-9_]+)::(?:collection|make)\s*\(\s*(.*?)\s*\)/);
   if (collMatch) {
     const res = collMatch[1];
     const inside = collMatch[2];
     if (inside.includes('whenLoaded(')) optional = true;
-    return { type: `${res}[]`, optional };
+    // Collection::collection or Collection::make is an anonymous collection
+    if (res === 'Collection') {
+      return { type: 'any[]', optional };
+    }
+    // If no resourcesDir provided, trust the resource name
+    // Otherwise, check if the resource file exists
+    if (!resourcesDir || existsSync(join(resourcesDir, `${res}.php`))) {
+      return { type: `${res}[]`, optional };
+    }
+    return { type: 'any[]', optional };
+  }
+
+  // Single resource instantiation: new Resource(...)
+  const singleResMatch = value.match(/new\s+([A-Za-z0-9_]+)\s*\(\s*(.*?)\s*\)/);
+  if (singleResMatch) {
+    const res = singleResMatch[1];
+    const inside = singleResMatch[2];
+    if (inside.includes('whenLoaded(')) optional = true;
+    // If no resourcesDir provided, trust the resource name
+    // Otherwise, check if the resource file exists
+    if (!resourcesDir || existsSync(join(resourcesDir, `${res}.php`))) {
+      return { type: res, optional };
+    }
+    return { type: 'any', optional };
   }
 
   // whenLoaded

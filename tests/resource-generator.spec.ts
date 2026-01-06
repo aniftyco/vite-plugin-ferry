@@ -224,15 +224,7 @@ describe('parseFieldsFromArrayBlock', () => {
       'is_admin' => $this->resource->is_admin,
       'isAdmin' => $this->resource->isAdmin,
     `;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'UserResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, '', '', '', {});
 
     expect(fields.is_admin).toEqual({ type: 'boolean', optional: false });
     expect(fields.isAdmin).toEqual({ type: 'boolean', optional: false });
@@ -243,15 +235,7 @@ describe('parseFieldsFromArrayBlock', () => {
       'has_comments' => $this->resource->has_comments,
       'hasComments' => $this->resource->hasComments,
     `;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'PostResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, '', '', '', {});
 
     expect(fields.has_comments).toEqual({ type: 'boolean', optional: false });
     expect(fields.hasComments).toEqual({ type: 'boolean', optional: false });
@@ -259,15 +243,7 @@ describe('parseFieldsFromArrayBlock', () => {
 
   it('infers string type from id field', () => {
     const block = `'id' => $this->resource->id,`;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'UserResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, '', '', '', {});
 
     expect(fields.id).toEqual({ type: 'string', optional: false });
   });
@@ -277,15 +253,7 @@ describe('parseFieldsFromArrayBlock', () => {
       'user_id' => $this->resource->user_id,
       'postId' => $this->resource->postId,
     `;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'PostResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, '', '', '', {});
 
     expect(fields.user_id).toEqual({ type: 'string', optional: false });
     expect(fields.postId).toEqual({ type: 'string', optional: false });
@@ -297,15 +265,7 @@ describe('parseFieldsFromArrayBlock', () => {
       'updatedAt' => $this->resource->updatedAt,
       'deleted_at' => $this->resource->deleted_at,
     `;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'UserResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, '', '', '', {});
 
     expect(fields.created_at).toEqual({ type: 'string', optional: false });
     expect(fields.updatedAt).toEqual({ type: 'string', optional: false });
@@ -314,45 +274,63 @@ describe('parseFieldsFromArrayBlock', () => {
 
   it('infers array type from Resource::collection', () => {
     const block = `'comments' => CommentResource::collection($this->resource->comments),`;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'PostResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, '', '', '', {});
 
     expect(fields.comments).toEqual({ type: 'CommentResource[]', optional: false });
   });
 
   it('infers optional array type from Resource::collection with whenLoaded', () => {
     const block = `'comments' => CommentResource::collection($this->whenLoaded('comments')),`;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'PostResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, '', '', '', {});
 
     expect(fields.comments).toEqual({ type: 'CommentResource[]', optional: true });
   });
 
+  it('infers type from new Resource()', () => {
+    const block = `'comment' => new CommentResource($this->resource->comment),`;
+    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, '', '', '', {});
+
+    expect(fields.comment).toEqual({ type: 'CommentResource', optional: false });
+  });
+
+  it('infers optional type from new Resource() with whenLoaded', () => {
+    const block = `'comment' => new CommentResource($this->whenLoaded('comment')),`;
+    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, '', '', '', {});
+
+    expect(fields.comment).toEqual({ type: 'CommentResource', optional: true });
+  });
+
+  it('infers array type from Resource::make()', () => {
+    const block = `'comments' => CommentResource::make($this->resource->comments),`;
+    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, '', '', '', {});
+
+    expect(fields.comments).toEqual({ type: 'CommentResource[]', optional: false });
+  });
+
+  it('infers optional array type from Resource::make() with whenLoaded', () => {
+    const block = `'comments' => CommentResource::make($this->whenLoaded('comments')),`;
+    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, '', '', '', {});
+
+    expect(fields.comments).toEqual({ type: 'CommentResource[]', optional: true });
+  });
+
+  it('infers anonymous array type from Collection::collection()', () => {
+    const block = `'items' => Collection::collection($this->resource->items),`;
+    const fields = parseFieldsFromArrayBlock(block, 'OrderResource', null, '', '', '', {});
+
+    expect(fields.items).toEqual({ type: 'any[]', optional: false });
+  });
+
+  it('infers anonymous array type from Collection::make()', () => {
+    const block = `'items' => Collection::make($this->resource->items),`;
+    const fields = parseFieldsFromArrayBlock(block, 'OrderResource', null, '', '', '', {});
+
+    expect(fields.items).toEqual({ type: 'any[]', optional: false });
+  });
+
   it('infers optional type from whenLoaded without Resource', () => {
     const block = `'author' => $this->whenLoaded('author'),`;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'PostResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, '', '', '', {});
 
     expect(fields.author.optional).toBe(true);
   });
@@ -364,15 +342,7 @@ describe('parseFieldsFromArrayBlock', () => {
           'city' => $this->resource->city,
       ],
     `;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'UserResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, '', '', '', {});
 
     expect(fields.address.type).toBe('{ street: string; city: string }');
   });
@@ -380,15 +350,7 @@ describe('parseFieldsFromArrayBlock', () => {
   it('uses docblock type hints when available', () => {
     const block = `'count' => $this->resource->count,`;
     const docShape = { count: 'number' };
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'StatsResource',
-      docShape,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'StatsResource', docShape, '', '', '', {});
 
     expect(fields.count).toEqual({ type: 'number', optional: false });
   });
@@ -398,15 +360,7 @@ describe('parseFieldsFromArrayBlock', () => {
       // This is a comment
       'id' => $this->resource->id,
     `;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'UserResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, '', '', '', {});
 
     expect(Object.keys(fields)).toEqual(['id']);
   });
@@ -418,15 +372,7 @@ describe('parseFieldsFromArrayBlock', () => {
       'email' => $this->resource->email,
       'is_admin' => $this->resource->is_admin,
     `;
-    const fields = parseFieldsFromArrayBlock(
-      block,
-      'UserResource',
-      null,
-      '',
-      '',
-      '',
-      {}
-    );
+    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, '', '', '', {});
 
     expect(Object.keys(fields)).toEqual(['id', 'name', 'email', 'is_admin']);
     expect(fields.id.type).toBe('string');
@@ -500,7 +446,8 @@ describe('resource generation integration', () => {
           is_published: boolean;
           has_comments: boolean;
           author?: UserResource[];
-          comments?: CommentResource[];
+          comments?: any[];
+          top_voted_comment?: any;
           created_at: string;
       };
 
