@@ -3,11 +3,20 @@ import ts from 'typescript';
 const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
 
 /**
+ * Unescape Unicode sequences back to their original characters.
+ * TypeScript's printer escapes non-ASCII characters, but we want to preserve emojis and other Unicode.
+ */
+function unescapeUnicode(str: string): string {
+  return str.replace(/\\u[\dA-Fa-f]{4}/g, (match) => JSON.parse(`"${match}"`));
+}
+
+/**
  * Print a TypeScript node to a string.
  */
 export function printNode(node: ts.Node): string {
   const sourceFile = ts.createSourceFile('output.ts', '', ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
-  return printer.printNode(ts.EmitHint.Unspecified, node, sourceFile);
+  const output = printer.printNode(ts.EmitHint.Unspecified, node, sourceFile);
+  return unescapeUnicode(output);
 }
 
 /**
