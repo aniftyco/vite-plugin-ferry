@@ -9,7 +9,7 @@ enum OrderStatus: string
     case REJECTED = 'rejected';
     case SHIPPED = 'shipped';
 
-    public function getLabel(): string
+    public function label(): string
     {
         return match($this) {
             self::PENDING => 'Pending Order',

@@ -166,16 +166,16 @@ export function parseEnumContent(phpContent: string): EnumDefinition | null {
     cases.push({ key, value });
   }
 
-  // Parse getLabel() method if it exists
+  // Parse label() method if it exists
   const methods = findAllNodesByKind(enumNode, 'method') as PhpParserTypes.Method[];
-  const getLabelMethod = methods.find((m) => {
+  const labelMethod = methods.find((m) => {
     const methodName = typeof m.name === 'string' ? m.name : (m.name as PhpParserTypes.Identifier).name;
-    return methodName === 'getLabel';
+    return methodName === 'label';
   });
 
-  if (getLabelMethod && getLabelMethod.body) {
+  if (labelMethod && labelMethod.body) {
     // Find match expression in the method
-    const matchNode = findNodeByKind(getLabelMethod.body, 'match') as PhpParserTypes.Match | null;
+    const matchNode = findNodeByKind(labelMethod.body, 'match') as PhpParserTypes.Match | null;
     if (matchNode && matchNode.arms) {
       for (const arm of matchNode.arms) {
         if (arm.conds) {
