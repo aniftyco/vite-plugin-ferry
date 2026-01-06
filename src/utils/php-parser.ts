@@ -1,4 +1,8 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type * as PhpParserTypes from 'php-parser';
+import { readFileSafe } from './file.js';
+import { mapPhpTypeToTs } from './type-mapper.js';
 
 // Import php-parser (CommonJS module with constructor)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -376,17 +380,352 @@ export function extractDocblockArrayShape(phpContent: string): Record<string, st
   return pairs;
 }
 
+export type ResourceFieldInfo = {
+  type: string;
+  optional: boolean;
+};
+
+export type ResourceArrayEntry = {
+  key: string;
+  fieldInfo: ResourceFieldInfo;
+  nested?: Record<string, ResourceArrayEntry>;
+};
+
+export type ParseResourceOptions = {
+  resourcesDir?: string;
+  modelsDir?: string;
+  enumsDir?: string;
+  docShape?: Record<string, string> | null;
+  collectedEnums?: Record<string, EnumDefinition>;
+  resourceClass?: string;
+};
+
 /**
- * Extract the return array block from a toArray() method in PHP content.
- * This is a pure function that takes PHP source code as input.
+ * Check if an AST node contains a whenLoaded call.
  */
-export function extractReturnArrayBlock(phpContent: string): string | null {
-  const match = phpContent.match(/function\s+toArray\s*\([^)]*\)\s*:\s*array\s*\{([\s\S]*?)\n\s*\}/);
-  if (!match) return null;
+function containsWhenLoaded(node: PhpParserTypes.Node): boolean {
+  if (node.kind === 'call') {
+    const call = node as PhpParserTypes.Call;
+    if (call.what.kind === 'propertylookup') {
+      const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
+      const offset = lookup.offset;
+      const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+      if (name === 'whenLoaded') return true;
+    }
+  }
 
-  const body = match[1];
-  const returnMatch = body.match(/return\s*\[\s*([\s\S]*?)\s*\];/);
-  if (!returnMatch) return null;
+  // Check arguments recursively
+  const obj = node as any;
+  for (const key of Object.keys(obj)) {
+    const val = obj[key];
+    if (val && typeof val === 'object') {
+      if (val.kind && containsWhenLoaded(val)) return true;
+      if (Array.isArray(val)) {
+        for (const item of val) {
+          if (item && item.kind && containsWhenLoaded(item)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 
-  return returnMatch[1];
+/**
+ * Extract resource name from a static call like Resource::make() or Resource::collection().
+ */
+function extractStaticCallResource(call: PhpParserTypes.Call): { resource: string; method: string } | null {
+  if (call.what.kind !== 'staticlookup') return null;
+
+  const lookup = call.what as unknown as PhpParserTypes.StaticLookup;
+  if (lookup.what.kind !== 'name') return null;
+
+  const resource = (lookup.what as PhpParserTypes.Name).name;
+  const offset = lookup.offset;
+  const method = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+
+  if (!method) return null;
+  return { resource, method };
+}
+
+/**
+ * Extract resource name from a new expression like new Resource().
+ */
+function extractNewResource(newExpr: PhpParserTypes.New): string | null {
+  if (newExpr.what.kind !== 'name') return null;
+  return (newExpr.what as PhpParserTypes.Name).name;
+}
+
+/**
+ * Extract property name from $this->resource->property.
+ */
+function extractResourceProperty(node: PhpParserTypes.Node): string | null {
+  if (node.kind !== 'propertylookup') return null;
+
+  const lookup = node as PhpParserTypes.PropertyLookup;
+  const what = lookup.what;
+
+  // Check for $this->resource
+  if (what.kind === 'propertylookup') {
+    const inner = what as PhpParserTypes.PropertyLookup;
+    if (inner.what.kind === 'variable' && (inner.what as PhpParserTypes.Variable).name === 'this') {
+      const innerOffset = inner.offset;
+      const innerName = innerOffset.kind === 'identifier' ? (innerOffset as PhpParserTypes.Identifier).name : null;
+      if (innerName === 'resource') {
+        const offset = lookup.offset;
+        return offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Map a PHP cast to a TypeScript type, potentially collecting enum references.
+ */
+function mapCastToType(cast: string, enumsDir: string, collectedEnums: Record<string, EnumDefinition>): string {
+  const original = cast;
+
+  // Try to find enum in app/Enums
+  const match = original.match(/([A-Za-z0-9_\\]+)$/);
+  const short = match ? match[1].replace(/^\\+/, '') : original;
+  const enumPath = join(enumsDir, `${short}.php`);
+
+  if (existsSync(enumPath)) {
+    const content = readFileSafe(enumPath);
+    if (content) {
+      const def = parseEnumContent(content);
+      if (def) {
+        collectedEnums[def.name] = def;
+        return def.name;
+      }
+    }
+  }
+
+  return mapPhpTypeToTs(cast);
+}
+
+/**
+ * Check if a resource file exists.
+ */
+function resourceExists(resourceName: string, resourcesDir: string | undefined): boolean {
+  if (!resourcesDir) return true; // Trust the name if no dir provided
+  return existsSync(join(resourcesDir, `${resourceName}.php`));
+}
+
+/**
+ * Infer TypeScript type from an AST value node.
+ */
+function inferTypeFromAstNode(
+  node: PhpParserTypes.Node,
+  key: string,
+  options: ParseResourceOptions = {}
+): ResourceFieldInfo {
+  const { resourcesDir, modelsDir, enumsDir, docShape, collectedEnums = {}, resourceClass = '' } = options;
+  const optional = containsWhenLoaded(node);
+
+  // Use docblock type if available
+  if (docShape && docShape[key]) {
+    return { type: docShape[key], optional };
+  }
+
+  // Boolean heuristics from key name
+  const lowerKey = key.toLowerCase();
+  if (lowerKey.startsWith('is_') || lowerKey.startsWith('has_') || /^(is|has)[A-Z]/.test(key)) {
+    return { type: 'boolean', optional };
+  }
+
+  // Handle static calls: Resource::collection() or Resource::make()
+  if (node.kind === 'call') {
+    const call = node as PhpParserTypes.Call;
+    const staticInfo = extractStaticCallResource(call);
+    if (staticInfo) {
+      const { resource, method } = staticInfo;
+      // Collection or Collection::make returns any[]
+      if (resource === 'Collection') {
+        return { type: 'any[]', optional };
+      }
+      // Resource::collection or Resource::make returns Resource[]
+      if (method === 'collection' || method === 'make') {
+        if (resourceExists(resource, resourcesDir)) {
+          return { type: `${resource}[]`, optional };
+        }
+        return { type: 'any[]', optional };
+      }
+    }
+
+    // Check if it's a whenLoaded call without a wrapper resource
+    if (call.what.kind === 'propertylookup') {
+      const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
+      const offset = lookup.offset;
+      const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+      if (name === 'whenLoaded') {
+        // Try to find matching resource (only if resourcesDir is provided)
+        if (resourcesDir) {
+          const args = call.arguments;
+          if (args.length > 0 && args[0].kind === 'string') {
+            const relationName = (args[0] as PhpParserTypes.String).value;
+            const candidate = `${relationName[0].toUpperCase()}${relationName.slice(1)}Resource`;
+            if (existsSync(join(resourcesDir, `${candidate}.php`))) {
+              return { type: candidate, optional: true };
+            }
+          }
+        }
+        return { type: 'Record<string, any>', optional: true };
+      }
+    }
+  }
+
+  // Handle new Resource()
+  if (node.kind === 'new') {
+    const newExpr = node as PhpParserTypes.New;
+    const resource = extractNewResource(newExpr);
+    if (resource) {
+      if (resourceExists(resource, resourcesDir)) {
+        return { type: resource, optional };
+      }
+      return { type: 'any', optional };
+    }
+    return { type: 'any', optional };
+  }
+
+  // Handle $this->resource->property
+  const prop = extractResourceProperty(node);
+  if (prop) {
+    const lower = prop.toLowerCase();
+
+    // Boolean checks
+    if (lower.startsWith('is_') || lower.startsWith('has_') || /^(is|has)[A-Z]/.test(prop)) {
+      return { type: 'boolean', optional: false };
+    }
+
+    // IDs and UUIDs
+    if (prop === 'id' || prop.endsWith('_id') || lower === 'uuid' || prop.endsWith('Id')) {
+      return { type: 'string', optional: false };
+    }
+
+    // Check model casts
+    if (modelsDir && resourceClass) {
+      const modelCandidate = resourceClass.replace(/Resource$/, '');
+      const modelPath = join(modelsDir, `${modelCandidate}.php`);
+
+      if (existsSync(modelPath)) {
+        const modelContent = readFileSafe(modelPath);
+        if (modelContent) {
+          const casts = parseModelCasts(modelContent);
+          if (casts[prop]) {
+            const cast = casts[prop];
+            const trim = cast.trim();
+            const tsType =
+              trim.startsWith('{') || trim.includes(':') || /array\s*\{/.test(trim)
+                ? trim
+                : mapCastToType(cast, enumsDir || '', collectedEnums);
+            return { type: tsType, optional: false };
+          }
+        }
+      }
+    }
+
+    // Timestamps
+    if (prop.endsWith('_at') || prop.endsWith('At')) {
+      return { type: 'string', optional: false };
+    }
+
+    return { type: 'string', optional: false };
+  }
+
+  // Handle nested arrays
+  if (node.kind === 'array') {
+    const arrayNode = node as PhpParserTypes.Array;
+    const nestedFields = parseArrayEntries(arrayNode.items, options);
+    if (Object.keys(nestedFields).length > 0) {
+      const props = Object.entries(nestedFields).map(([k, v]) => {
+        const opt = v.fieldInfo.optional ? '?' : '';
+        return `${k}${opt}: ${v.fieldInfo.type}`;
+      });
+      return { type: `{ ${props.join('; ')} }`, optional };
+    }
+    return { type: 'any[]', optional };
+  }
+
+  return { type: 'any', optional };
+}
+
+/**
+ * Parse array entries from AST array items.
+ */
+function parseArrayEntries(
+  items: (PhpParserTypes.Entry | PhpParserTypes.Expression | PhpParserTypes.Variable)[],
+  options: ParseResourceOptions = {}
+): Record<string, ResourceArrayEntry> {
+  const result: Record<string, ResourceArrayEntry> = {};
+
+  for (const item of items) {
+    if (item.kind !== 'entry') continue;
+
+    const entry = item as PhpParserTypes.Entry;
+    if (!entry.key) continue;
+
+    const key = getStringValue(entry.key);
+    if (!key) continue;
+
+    const fieldInfo = inferTypeFromAstNode(entry.value, key, options);
+    result[key] = { key, fieldInfo };
+
+    // Handle nested arrays
+    if (entry.value.kind === 'array') {
+      const nested = parseArrayEntries((entry.value as PhpParserTypes.Array).items, options);
+      if (Object.keys(nested).length > 0) {
+        result[key].nested = nested;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Parse resource fields from PHP content using AST.
+ * Returns null if parsing fails or no toArray method is found.
+ */
+export function parseResourceFieldsAst(
+  phpContent: string,
+  options: Omit<ParseResourceOptions, 'resourceClass'> = {}
+): Record<string, ResourceFieldInfo> | null {
+  const ast = parsePhp(phpContent);
+  if (!ast) return null;
+
+  // Find the class
+  const classNode = findNodeByKind(ast, 'class') as PhpParserTypes.Class | null;
+  if (!classNode) return null;
+
+  // Extract class name for model cast lookups
+  const className =
+    typeof classNode.name === 'string'
+      ? classNode.name
+      : (classNode.name as PhpParserTypes.Identifier).name;
+
+  // Find toArray method
+  const methods = findAllNodesByKind(classNode, 'method') as PhpParserTypes.Method[];
+  const toArrayMethod = methods.find((m) => {
+    const methodName = typeof m.name === 'string' ? m.name : (m.name as PhpParserTypes.Identifier).name;
+    return methodName === 'toArray';
+  });
+
+  if (!toArrayMethod || !toArrayMethod.body) return null;
+
+  // Find return statement with array
+  const returnNode = findNodeByKind(toArrayMethod.body, 'return') as PhpParserTypes.Return | null;
+  if (!returnNode || !returnNode.expr || returnNode.expr.kind !== 'array') return null;
+
+  const arrayNode = returnNode.expr as PhpParserTypes.Array;
+  const entries = parseArrayEntries(arrayNode.items, { ...options, resourceClass: className });
+
+  // Convert to flat field info
+  const result: Record<string, ResourceFieldInfo> = {};
+  for (const [key, entry] of Object.entries(entries)) {
+    result[key] = entry.fieldInfo;
+  }
+
+  return result;
 }

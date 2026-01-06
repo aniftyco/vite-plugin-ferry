@@ -1,12 +1,13 @@
-import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { describe, it, expect } from 'vitest';
 import {
   parseEnumContent,
   parseModelCasts,
   extractDocblockArrayShape,
-  extractReturnArrayBlock,
+  parseResourceFieldsAst,
 } from '../src/utils/php-parser.js';
+import { dedent } from './utils.js';
 
 const fixturesDir = join(import.meta.dirname, 'fixtures');
 
@@ -140,11 +141,11 @@ describe('extractDocblockArrayShape', () => {
   });
 
   it('returns null when no docblock shape exists', () => {
-    const content = `
-    public function toArray($request): array
-    {
-        return ['id' => $this->id];
-    }
+    const content = dedent`
+      public function toArray($request): array
+      {
+          return ['id' => $this->id];
+      }
     `;
 
     const result = extractDocblockArrayShape(content);
@@ -162,14 +163,14 @@ describe('extractDocblockArrayShape', () => {
   });
 
   it('parses multiline docblock with asterisks', () => {
-    const content = `
-    /**
-     * @return array {
-     *     id: string,
-     *     name: string,
-     *     email: string,
-     * }
-     */
+    const content = dedent`
+      /**
+       * @return array {
+       *     id: string,
+       *     name: string,
+       *     email: string,
+       * }
+       */
     `;
 
     const result = extractDocblockArrayShape(content);
@@ -200,70 +201,77 @@ describe('extractDocblockArrayShape', () => {
   });
 });
 
-describe('extractReturnArrayBlock', () => {
-  it('extracts return array from toArray method', () => {
-    const content = `
-    public function toArray($request): array
-    {
-        return [
-            'id' => $this->resource->id,
-            'name' => $this->resource->name,
-        ];
-    }
-    `;
-
-    const result = extractReturnArrayBlock(content);
+describe('parseResourceFieldsAst', () => {
+  it('parses UserResource fields using AST', () => {
+    const content = readFixture('Resources/UserResource.php');
+    const result = parseResourceFieldsAst(content);
 
     expect(result).not.toBeNull();
-    expect(result).toContain("'id' => $this->resource->id");
-    expect(result).toContain("'name' => $this->resource->name");
+    expect(result).toEqual({
+      id: { type: 'string', optional: false },
+      name: { type: 'string', optional: false },
+      email: { type: 'string', optional: false },
+      is_admin: { type: 'boolean', optional: false },
+      created_at: { type: 'string', optional: false },
+      updated_at: { type: 'string', optional: false },
+    });
   });
 
-  it('returns null when no toArray method exists', () => {
-    const content = `
-    public function getData(): array
-    {
-        return ['id' => $this->id];
-    }
-    `;
+  it('parses PostResource with relations using AST', () => {
+    const content = readFixture('Resources/PostResource.php');
+    const result = parseResourceFieldsAst(content);
 
-    const result = extractReturnArrayBlock(content);
+    expect(result).not.toBeNull();
+    expect(result).toEqual({
+      id: { type: 'string', optional: false },
+      title: { type: 'string', optional: false },
+      slug: { type: 'string', optional: false },
+      is_published: { type: 'boolean', optional: false },
+      has_comments: { type: 'boolean', optional: false },
+      author: { type: 'UserResource[]', optional: true },
+      comments: { type: 'CommentResource[]', optional: true },
+      top_voted_comment: { type: 'CommentResource', optional: true },
+      created_at: { type: 'string', optional: false },
+    });
+  });
+
+  it('parses OrderResource with nested arrays using AST', () => {
+    const content = readFixture('Resources/OrderResource.php');
+    const result = parseResourceFieldsAst(content);
+
+    expect(result).not.toBeNull();
+    expect(result).toEqual({
+      id: { type: 'string', optional: false },
+      total: { type: 'string', optional: false },
+      status: { type: 'string', optional: false },
+      items: { type: 'string', optional: false },
+      user: { type: 'Record<string, any>', optional: true }, // No resourcesDir, can't resolve
+      shipping_address: { type: '{ street: string; city: string; zip: string }', optional: false },
+      created_at: { type: 'string', optional: false },
+    });
+  });
+
+  it('resolves whenLoaded to resource type when resourcesDir provided', () => {
+    const content = readFixture('Resources/OrderResource.php');
+    const resourcesDir = join(fixturesDir, 'Resources');
+    const result = parseResourceFieldsAst(content, { resourcesDir });
+
+    expect(result).not.toBeNull();
+    expect(result!.user).toEqual({ type: 'UserResource', optional: true });
+  });
+
+  it('returns null for invalid PHP', () => {
+    const result = parseResourceFieldsAst('not valid php');
     expect(result).toBeNull();
   });
 
-  it('extracts array block from UserResource fixture', () => {
-    const content = readFixture('Resources/UserResource.php');
-    const result = extractReturnArrayBlock(content);
-
-    expect(result).not.toBeNull();
-    expect(result).toContain("'id' => $this->resource->id");
-    expect(result).toContain("'name' => $this->resource->name");
-    expect(result).toContain("'email' => $this->resource->email");
-    expect(result).toContain("'is_admin' => $this->resource->is_admin");
-    expect(result).toContain("'created_at' => $this->resource->created_at");
-    expect(result).toContain("'updated_at' => $this->resource->updated_at");
+  it('returns null for PHP without class', () => {
+    const result = parseResourceFieldsAst('<?php echo "hello";');
+    expect(result).toBeNull();
   });
 
-  it('extracts array block from PostResource with relations', () => {
-    const content = readFixture('Resources/PostResource.php');
-    const result = extractReturnArrayBlock(content);
-
-    expect(result).not.toBeNull();
-    expect(result).toContain("'id' => $this->resource->id");
-    expect(result).toContain('UserResource::collection');
-    expect(result).toContain('CommentResource::collection');
-    expect(result).toContain("whenLoaded('author')");
-    expect(result).toContain("whenLoaded('comments')");
-  });
-
-  it('extracts array block with nested arrays from OrderResource', () => {
-    const content = readFixture('Resources/OrderResource.php');
-    const result = extractReturnArrayBlock(content);
-
-    expect(result).not.toBeNull();
-    expect(result).toContain("'shipping_address' => [");
-    expect(result).toContain("'street' => $this->resource->address_street");
-    expect(result).toContain("'city' => $this->resource->address_city");
-    expect(result).toContain("'zip' => $this->resource->address_zip");
+  it('returns null for class without toArray method', () => {
+    const result = parseResourceFieldsAst('<?php class Foo { public function bar() {} }');
+    expect(result).toBeNull();
   });
 });
