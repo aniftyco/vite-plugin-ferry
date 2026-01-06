@@ -110,6 +110,17 @@ export type UserResource = {
 };
 ```
 
+## Publishing
+
+To publish a new version:
+
+```bash
+npm version patch  # or minor, major
+git push --follow-tags
+```
+
+This bumps the version, creates a commit and tag, then pushes both to trigger the publish workflow.
+
 ## License
 
 See [LICENSE](LICENSE) for details.
