@@ -7,6 +7,7 @@ import { setupResourceWatcher } from './watchers/resources.js';
 
 export type ResourceTypesPluginOptions = {
   cwd?: string;
+  prettyPrint?: boolean;
 };
 
 /**
@@ -17,22 +18,22 @@ export type ResourceTypesPluginOptions = {
  * - @app/resources - Laravel JsonResource types
  * - @app/schemas - (future) Zod schemas from FormRequests
  */
-export default function ferry(
-  options: ResourceTypesPluginOptions = {
-    cwd: process.cwd(),
-  }
-): Plugin {
+export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin {
   const namespace = '@ferry';
   const name = 'vite-plugin-ferry';
 
+  // Apply defaults
+  const cwd = options.cwd ?? process.cwd();
+  const prettyPrint = options.prettyPrint ?? true;
+
   // Directory paths
-  const enumsDir = join(options.cwd, 'app/Enums');
-  const resourcesDir = join(options.cwd, 'app/Http/Resources');
-  const modelsDir = join(options.cwd, 'app/Models');
+  const enumsDir = join(cwd, 'app/Enums');
+  const resourcesDir = join(cwd, 'app/Http/Resources');
+  const modelsDir = join(cwd, 'app/Models');
 
   // Output directories for each package
-  const enumsOutputDir = join(options.cwd, 'node_modules', ...namespace.split('/'), 'enums');
-  const resourcesOutputDir = join(options.cwd, 'node_modules', ...namespace.split('/'), 'resources');
+  const enumsOutputDir = join(cwd, 'node_modules', ...namespace.split('/'), 'enums');
+  const resourcesOutputDir = join(cwd, 'node_modules', ...namespace.split('/'), 'resources');
 
   /**
    * Generate all packages.
@@ -43,6 +44,7 @@ export default function ferry(
       enumsDir,
       outputDir: enumsOutputDir,
       packageName: `${namespace}/enums`,
+      prettyPrint,
     });
 
     // Generate @app/resources package
@@ -52,6 +54,7 @@ export default function ferry(
       modelsDir,
       outputDir: resourcesOutputDir,
       packageName: `${namespace}/resources`,
+      prettyPrint,
     });
   }
 
