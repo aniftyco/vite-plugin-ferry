@@ -1,3 +1,4 @@
+import { join, parse } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   generateResourceTypeScript,
@@ -5,7 +6,12 @@ import {
   parseFieldsFromArrayBlock,
   type FieldInfo,
 } from '../src/generators/resources.js';
+import { readFileSafe, getPhpFiles } from '../src/utils/file.js';
+import { extractDocblockArrayShape, extractReturnArrayBlock } from '../src/utils/php-parser.js';
+import { mapDocTypeToTs } from '../src/utils/type-mapper.js';
 import { dedent } from './utils.js';
+
+const fixturesDir = join(import.meta.dirname, 'fixtures');
 
 describe('generateResourceTypeScript', () => {
   it('generates type declarations for resources', () => {
@@ -151,12 +157,13 @@ describe('generateResourceRuntime', () => {
 });
 
 describe('resource type inference patterns', () => {
-  it('preserves boolean types for is_ and has_ prefixed fields', () => {
+  it('preserves boolean types for is and has prefixed fields', () => {
     const resources: Record<string, Record<string, FieldInfo>> = {
       UserResource: {
         is_admin: { type: 'boolean', optional: false },
-        is_verified: { type: 'boolean', optional: false },
+        isVerified: { type: 'boolean', optional: false },
         has_comments: { type: 'boolean', optional: false },
+        hasShares: { type: 'boolean', optional: false },
       },
     };
 
@@ -165,8 +172,9 @@ describe('resource type inference patterns', () => {
     expect(result).toBe(dedent`
       export type UserResource = {
           is_admin: boolean;
-          is_verified: boolean;
+          isVerified: boolean;
           has_comments: boolean;
+          hasShares: boolean;
       };
     `);
   });
@@ -175,7 +183,7 @@ describe('resource type inference patterns', () => {
     const resources: Record<string, Record<string, FieldInfo>> = {
       UserResource: {
         created_at: { type: 'string', optional: false },
-        updated_at: { type: 'string', optional: false },
+        updatedAt: { type: 'string', optional: false },
       },
     };
 
@@ -184,7 +192,7 @@ describe('resource type inference patterns', () => {
     expect(result).toBe(dedent`
       export type UserResource = {
           created_at: string;
-          updated_at: string;
+          updatedAt: string;
       };
     `);
   });
@@ -211,77 +219,140 @@ describe('resource type inference patterns', () => {
 });
 
 describe('parseFieldsFromArrayBlock', () => {
-  const emptyDirs = { resourcesDir: '', modelsDir: '', enumsDir: '' };
-
-  it('infers boolean type from is_ prefix', () => {
-    const block = `'is_admin' => $this->resource->is_admin,`;
-    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+  it('infers boolean type from is prefix', () => {
+    const block = dedent`
+      'is_admin' => $this->resource->is_admin,
+      'isAdmin' => $this->resource->isAdmin,
+    `;
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'UserResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.is_admin).toEqual({ type: 'boolean', optional: false });
+    expect(fields.isAdmin).toEqual({ type: 'boolean', optional: false });
   });
 
-  it('infers boolean type from has_ prefix', () => {
-    const block = `'has_comments' => $this->resource->has_comments,`;
-    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+  it('infers boolean type from has prefix', () => {
+    const block = dedent`
+      'has_comments' => $this->resource->has_comments,
+      'hasComments' => $this->resource->hasComments,
+    `;
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'PostResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.has_comments).toEqual({ type: 'boolean', optional: false });
-  });
-
-  it('infers boolean type from camelCase is/has prefix', () => {
-    const block = `
-      'isVerified' => $this->resource->isVerified,
-      'hasSubscription' => $this->resource->hasSubscription,
-    `;
-    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
-
-    expect(fields.isVerified).toEqual({ type: 'boolean', optional: false });
-    expect(fields.hasSubscription).toEqual({ type: 'boolean', optional: false });
+    expect(fields.hasComments).toEqual({ type: 'boolean', optional: false });
   });
 
   it('infers string type from id field', () => {
     const block = `'id' => $this->resource->id,`;
-    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'UserResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.id).toEqual({ type: 'string', optional: false });
   });
 
   it('infers string type from _id suffix', () => {
-    const block = `'user_id' => $this->resource->user_id,`;
-    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const block = dedent`
+      'user_id' => $this->resource->user_id,
+      'postId' => $this->resource->postId,
+    `;
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'PostResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.user_id).toEqual({ type: 'string', optional: false });
+    expect(fields.postId).toEqual({ type: 'string', optional: false });
   });
 
   it('infers string type from timestamp fields', () => {
     const block = `
       'created_at' => $this->resource->created_at,
-      'updated_at' => $this->resource->updated_at,
+      'updatedAt' => $this->resource->updatedAt,
       'deleted_at' => $this->resource->deleted_at,
     `;
-    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'UserResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.created_at).toEqual({ type: 'string', optional: false });
-    expect(fields.updated_at).toEqual({ type: 'string', optional: false });
+    expect(fields.updatedAt).toEqual({ type: 'string', optional: false });
     expect(fields.deleted_at).toEqual({ type: 'string', optional: false });
   });
 
   it('infers array type from Resource::collection', () => {
     const block = `'comments' => CommentResource::collection($this->resource->comments),`;
-    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'PostResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.comments).toEqual({ type: 'CommentResource[]', optional: false });
   });
 
   it('infers optional array type from Resource::collection with whenLoaded', () => {
     const block = `'comments' => CommentResource::collection($this->whenLoaded('comments')),`;
-    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'PostResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.comments).toEqual({ type: 'CommentResource[]', optional: true });
   });
 
   it('infers optional type from whenLoaded without Resource', () => {
     const block = `'author' => $this->whenLoaded('author'),`;
-    const fields = parseFieldsFromArrayBlock(block, 'PostResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'PostResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.author.optional).toBe(true);
   });
@@ -293,7 +364,15 @@ describe('parseFieldsFromArrayBlock', () => {
           'city' => $this->resource->city,
       ],
     `;
-    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'UserResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.address.type).toBe('{ street: string; city: string }');
   });
@@ -301,34 +380,140 @@ describe('parseFieldsFromArrayBlock', () => {
   it('uses docblock type hints when available', () => {
     const block = `'count' => $this->resource->count,`;
     const docShape = { count: 'number' };
-    const fields = parseFieldsFromArrayBlock(block, 'StatsResource', docShape, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'StatsResource',
+      docShape,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(fields.count).toEqual({ type: 'number', optional: false });
   });
 
   it('skips comment lines', () => {
-    const block = `
+    const block = dedent`
       // This is a comment
       'id' => $this->resource->id,
     `;
-    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'UserResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(Object.keys(fields)).toEqual(['id']);
   });
 
   it('handles multiple fields', () => {
-    const block = `
+    const block = dedent`
       'id' => $this->resource->id,
       'name' => $this->resource->name,
       'email' => $this->resource->email,
       'is_admin' => $this->resource->is_admin,
     `;
-    const fields = parseFieldsFromArrayBlock(block, 'UserResource', null, emptyDirs.resourcesDir, emptyDirs.modelsDir, emptyDirs.enumsDir, {});
+    const fields = parseFieldsFromArrayBlock(
+      block,
+      'UserResource',
+      null,
+      '',
+      '',
+      '',
+      {}
+    );
 
     expect(Object.keys(fields)).toEqual(['id', 'name', 'email', 'is_admin']);
     expect(fields.id.type).toBe('string');
     expect(fields.name.type).toBe('string');
     expect(fields.email.type).toBe('string');
     expect(fields.is_admin.type).toBe('boolean');
+  });
+});
+
+describe('resource generation integration', () => {
+  it('collects and generates complete resource output', () => {
+    const resourcesDir = join(fixturesDir, 'Resources');
+    const modelsDir = join(fixturesDir, 'Models');
+    const enumsDir = join(fixturesDir, 'Enums');
+
+    const resources: Record<string, Record<string, FieldInfo>> = {};
+    const fallbacks: string[] = [];
+
+    const files = getPhpFiles(resourcesDir);
+
+    for (const file of files) {
+      const filePath = join(resourcesDir, file);
+      const content = readFileSafe(filePath) || '';
+      const className = parse(file).name;
+
+      const docShape = extractDocblockArrayShape(content);
+      const arrayBlock = extractReturnArrayBlock(content);
+
+      if (!arrayBlock) {
+        fallbacks.push(className);
+        resources[className] = {};
+      } else {
+        const mappedDocShape = docShape
+          ? Object.fromEntries(Object.entries(docShape).map(([k, v]) => [k, mapDocTypeToTs(v)]))
+          : null;
+        const fields = parseFieldsFromArrayBlock(
+          arrayBlock,
+          className,
+          mappedDocShape,
+          resourcesDir,
+          modelsDir,
+          enumsDir,
+          {}
+        );
+        resources[className] = fields;
+      }
+    }
+
+    const typescript = generateResourceTypeScript(resources, fallbacks, new Set());
+    const runtime = generateResourceRuntime();
+
+    expect(typescript).toBe(dedent`
+      export type OrderResource = {
+          id: string;
+          total: number;
+          status: string;
+          items: any[];
+          user?: UserResource;
+          shipping_address: {
+              street: string;
+              city: string;
+              zip: string;
+          };
+          created_at: string;
+      };
+
+      export type PostResource = {
+          id: string;
+          title: string;
+          slug: string;
+          is_published: boolean;
+          has_comments: boolean;
+          author?: UserResource[];
+          comments?: CommentResource[];
+          created_at: string;
+      };
+
+      export type UserResource = {
+          id: string;
+          name: string;
+          email: string;
+          is_admin: boolean;
+          created_at: string;
+          updated_at: string;
+      };
+    `);
+
+    expect(runtime).toBe('export default {};');
   });
 });

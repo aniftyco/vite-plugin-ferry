@@ -162,28 +162,86 @@ describe('enum generation integration', () => {
     const typescript = generateEnumTypeScript(enums);
     const runtime = generateEnumRuntime(enums);
 
-    // Check TypeScript declarations contain expected enums
-    expect(typescript).toContain('export enum Color');
-    expect(typescript).toContain('RED = "RED"');
-    expect(typescript).toContain('export declare const OrderStatus');
-    expect(typescript).toContain('PENDING');
-    expect(typescript).toContain('"pending"');
-    expect(typescript).toContain('export enum Priority');
-    expect(typescript).toContain('LOW = 1');
-    expect(typescript).toContain('export enum Role');
-    expect(typescript).toContain('ADMIN = "admin"');
+    expect(typescript).toBe(dedent`
+      export enum Color {
+          RED = "RED",
+          GREEN = "GREEN",
+          BLUE = "BLUE"
+      }
 
-    // Check runtime contains expected exports
-    expect(runtime).toContain('export const Color');
-    expect(runtime).toContain('RED: "RED"');
-    expect(runtime).toContain('export const OrderStatus');
-    expect(runtime).toContain('PENDING: {');
-    expect(runtime).toContain('value: "pending"');
-    expect(runtime).toContain('label: "Pending Order"');
-    expect(runtime).toContain('export const Priority');
-    expect(runtime).toContain('LOW: 1');
-    expect(runtime).toContain('export const Role');
-    expect(runtime).toContain('ADMIN: "admin"');
-    expect(runtime).toContain('export default {}');
+      export declare const OrderStatus: {
+          PENDING: {
+              value: "pending";
+              label: "Pending Order";
+          };
+          APPROVED: {
+              value: "approved";
+              label: "Approved";
+          };
+          REJECTED: {
+              value: "rejected";
+              label: "Rejected";
+          };
+          SHIPPED: {
+              value: "shipped";
+              label: "Shipped";
+          };
+      };
+
+      export enum Priority {
+          LOW = 1,
+          MEDIUM = 2,
+          HIGH = 3,
+          URGENT = 4
+      }
+
+      export enum Role {
+          ADMIN = "admin",
+          USER = "user",
+          GUEST = "guest"
+      }
+    `);
+
+    expect(runtime).toBe(dedent`
+      export const Color = {
+          RED: "RED",
+          GREEN: "GREEN",
+          BLUE: "BLUE"
+      };
+
+      export const OrderStatus = {
+          PENDING: {
+              value: "pending",
+              label: "Pending Order"
+          },
+          APPROVED: {
+              value: "approved",
+              label: "Approved"
+          },
+          REJECTED: {
+              value: "rejected",
+              label: "Rejected"
+          },
+          SHIPPED: {
+              value: "shipped",
+              label: "Shipped"
+          }
+      };
+
+      export const Priority = {
+          LOW: 1,
+          MEDIUM: 2,
+          HIGH: 3,
+          URGENT: 4
+      };
+
+      export const Role = {
+          ADMIN: "admin",
+          USER: "user",
+          GUEST: "guest"
+      };
+
+      export default {};
+    `);
   });
 });
