@@ -66,7 +66,12 @@ export default function ferry(
       } catch (e) {
         console.error(`[${name}] Error generating types during config():`, e);
       }
-      return null;
+
+      return {
+        optimizeDeps: {
+          exclude: [`${namespace}/enums`, `${namespace}/resources`],
+        },
+      };
     },
 
     // Run generation when build starts
