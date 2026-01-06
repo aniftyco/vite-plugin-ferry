@@ -1,0 +1,25 @@
+{
+  "name": "vite-plugin-ferry",
+  "prettier": "@aniftyco/prettier",
+  "description": "Ferries Laravel types to your TypeScript frontend",
+  "type": "module",
+  "version": "0.0.0",
+  "repository": "https://github.com/aniftyco/vite-plugin-ferry",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "start": "tsc --watch",
+    "build": "rm -rf dist/ && tsc",
+    "prepublishOnly": "rm -rf dist/ && tsc"
+  },
+  "devDependencies": {
+    "@aniftyco/prettier": "^1.3.0",
+    "@types/node": "^24",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.3.0"
+  }
+}
