@@ -14,8 +14,7 @@
     "start": "tsc --watch",
     "build": "rm -rf dist/ && tsc",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "prepublishOnly": "rm -rf dist/ && tsc"
+    "test:watch": "vitest"
   },
   "dependencies": {
     "php-parser": "^3.2.5"
