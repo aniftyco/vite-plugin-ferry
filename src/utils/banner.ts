@@ -1,23 +1,6 @@
 import pc from 'picocolors';
 
 /**
- * Display a startup banner for the plugin.
- */
-export function displayBanner(options: { packages: string[]; version?: string }): void {
-  const { packages, version = '1.0.0' } = options;
-
-  console.log('');
-  console.log(pc.cyan('  PRIMCLOUD') + pc.dim(` resource-types ${pc.bold(`v${version}`)}`));
-  console.log('');
-
-  for (const pkg of packages) {
-    console.log(pc.green('  ➜') + '  ' + pc.bold(pkg));
-  }
-
-  console.log('');
-}
-
-/**
  * Log a file change event.
  */
 export function logFileChange(packageName: string, fileName: string): void {

@@ -2,7 +2,6 @@ import { join } from 'node:path';
 import type { Plugin } from 'vite';
 import { generateEnums } from './generators/enums.js';
 import { generateResources } from './generators/resources.js';
-import { displayBanner } from './utils/banner.js';
 import { setupEnumWatcher } from './watchers/enums.js';
 import { setupResourceWatcher } from './watchers/resources.js';
 
@@ -81,16 +80,6 @@ export default function ferry(
 
     // Set up watchers for dev server
     configureServer(server) {
-      // Display startup banner
-      server.httpServer?.once('listening', () => {
-        setTimeout(() => {
-          displayBanner({
-            packages: [`${namespace}/enums`, `${namespace}/resources`],
-            version: '1.0.0',
-          });
-        }, 200);
-      });
-
       // Set up enum watcher
       setupEnumWatcher({
         enumsDir,
