@@ -1,8 +1,23 @@
-import { readFileSafe } from './file.js';
+import type * as PhpParserTypes from 'php-parser';
+
+// Import php-parser (CommonJS module with constructor)
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const PhpParser = require('php-parser') as new (options?: object) => PhpParserTypes.Engine;
+
+// Initialize the PHP parser (PHP 8+ only)
+const parser = new PhpParser({
+  parser: {
+    extractDoc: true,
+    php8: true,
+  },
+  ast: {
+    withPositions: false,
+  },
+});
 
 export type EnumCase = {
   key: string;
-  value: string;
+  value: string | number;
   label?: string;
 };
 
@@ -13,49 +28,181 @@ export type EnumDefinition = {
 };
 
 /**
- * Parse a PHP enum file and extract its definition.
+ * Parse PHP content and return the AST.
+ * Uses parseEval which doesn't require <?php tags or filenames.
  */
-export function parseEnumFile(enumPath: string): EnumDefinition | null {
-  const content = readFileSafe(enumPath);
-  if (!content) return null;
+function parsePhp(content: string): PhpParserTypes.Program | null {
+  try {
+    // Strip <?php tag if present (parseEval expects raw PHP code)
+    let code = content.trimStart();
+    if (code.startsWith('<?php')) {
+      code = code.slice(5);
+    } else if (code.startsWith('<?')) {
+      code = code.slice(2);
+    }
+    return parser.parseEval(code);
+  } catch {
+    return null;
+  }
+}
 
-  // Extract enum name and backing type
-  const enumMatch = content.match(/enum\s+([A-Za-z0-9_]+)\s*(?:\:\s*([A-Za-z0-9_]+))?/);
-  if (!enumMatch) return null;
+/**
+ * Walk all child nodes in an AST node.
+ */
+function walkChildren(node: PhpParserTypes.Node, callback: (child: PhpParserTypes.Node) => boolean): boolean {
+  const obj = node as any;
+  for (const key of Object.keys(obj)) {
+    const val = obj[key];
+    if (val && typeof val === 'object' && val.kind) {
+      if (callback(val)) return true;
+    } else if (Array.isArray(val)) {
+      for (const item of val) {
+        if (item && typeof item === 'object' && item.kind) {
+          if (callback(item)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 
-  const name = enumMatch[1];
-  const backing = enumMatch[2] ? enumMatch[2].toLowerCase() : null;
+/**
+ * Find a node by kind in the AST.
+ */
+function findNodeByKind(ast: PhpParserTypes.Node, kind: string): PhpParserTypes.Node | null {
+  if (ast.kind === kind) return ast;
+
+  let result: PhpParserTypes.Node | null = null;
+  walkChildren(ast, (child) => {
+    const found = findNodeByKind(child, kind);
+    if (found) {
+      result = found;
+      return true;
+    }
+    return false;
+  });
+
+  return result;
+}
+
+/**
+ * Find all nodes of a specific kind in the AST.
+ */
+function findAllNodesByKind(ast: PhpParserTypes.Node, kind: string): PhpParserTypes.Node[] {
+  const results: PhpParserTypes.Node[] = [];
+
+  function walk(node: PhpParserTypes.Node) {
+    if (node.kind === kind) {
+      results.push(node);
+    }
+    walkChildren(node, (child) => {
+      walk(child);
+      return false;
+    });
+  }
+
+  walk(ast);
+  return results;
+}
+
+/**
+ * Extract string value from a PHP literal node.
+ */
+function getStringValue(node: PhpParserTypes.Node): string | null {
+  if (node.kind === 'string') {
+    return (node as PhpParserTypes.String).value;
+  }
+  if (node.kind === 'number') {
+    return String((node as PhpParserTypes.Number).value);
+  }
+  return null;
+}
+
+/**
+ * Parse PHP enum content and extract its definition.
+ * This is a pure function that takes PHP source code as input.
+ */
+export function parseEnumContent(phpContent: string): EnumDefinition | null {
+  const ast = parsePhp(phpContent);
+  if (!ast) return null;
+
+  // Find the enum declaration
+  const enumNode = findNodeByKind(ast, 'enum') as PhpParserTypes.Enum | null;
+  if (!enumNode) return null;
+
+  const name = typeof enumNode.name === 'string' ? enumNode.name : (enumNode.name as PhpParserTypes.Identifier).name;
+  const backing = enumNode.valueType ? (enumNode.valueType as PhpParserTypes.Identifier).name.toLowerCase() : null;
 
   // Extract enum cases
   const cases: EnumCase[] = [];
-  const explicitCases = [...content.matchAll(/case\s+([A-Za-z0-9_]+)\s*=\s*'([^']*)'\s*;/g)];
+  const enumCases = findAllNodesByKind(enumNode, 'enumcase') as PhpParserTypes.EnumCase[];
 
-  if (explicitCases.length) {
-    for (const match of explicitCases) {
-      cases.push({ key: match[1], value: match[2] });
+  for (const enumCase of enumCases) {
+    // Name can be an Identifier or string
+    const key =
+      typeof enumCase.name === 'string'
+        ? enumCase.name
+        : (enumCase.name as PhpParserTypes.Identifier).name;
+
+    let value: string | number;
+    if (enumCase.value !== null && enumCase.value !== undefined) {
+      // Value is a String or Number node (types say string|number but runtime is Node)
+      const valueNode = enumCase.value as unknown as PhpParserTypes.Node;
+      if (typeof valueNode === 'object' && valueNode.kind) {
+        if (valueNode.kind === 'number') {
+          // php-parser returns number values as strings, convert to actual number
+          value = Number((valueNode as PhpParserTypes.Number).value);
+        } else {
+          const extracted = getStringValue(valueNode);
+          value = extracted !== null ? extracted : key;
+        }
+      } else {
+        value = String(enumCase.value);
+      }
+    } else {
+      value = key;
     }
-  } else {
-    const implicitCases = [...content.matchAll(/case\s+([A-Za-z0-9_]+)\s*;/g)];
-    for (const match of implicitCases) {
-      cases.push({ key: match[1], value: match[1] });
-    }
+
+    cases.push({ key, value });
   }
 
-  // Parse getLabel() method if it exists
-  const labelMethodMatch = content.match(
-    /function\s+getLabel\s*\(\s*\)\s*:\s*string\s*\{[\s\S]*?return\s+match\s*\(\s*\$this\s*\)\s*\{([\s\S]*?)\};/
-  );
+  // Parse label() method if it exists
+  const methods = findAllNodesByKind(enumNode, 'method') as PhpParserTypes.Method[];
+  const labelMethod = methods.find((m) => {
+    const methodName = typeof m.name === 'string' ? m.name : (m.name as PhpParserTypes.Identifier).name;
+    return methodName === 'label';
+  });
 
-  if (labelMethodMatch) {
-    const matchBody = labelMethodMatch[1];
-    const labelMatches = [...matchBody.matchAll(/self::([A-Za-z0-9_]+)\s*=>\s*'([^']*)'/g)];
+  if (labelMethod && labelMethod.body) {
+    // Find match expression in the method
+    const matchNode = findNodeByKind(labelMethod.body, 'match') as PhpParserTypes.Match | null;
+    if (matchNode && matchNode.arms) {
+      for (const arm of matchNode.arms) {
+        if (arm.conds) {
+          for (const cond of arm.conds) {
+            // Handle self::CASE_NAME
+            if (cond.kind === 'staticlookup') {
+              const lookup = cond as PhpParserTypes.StaticLookup;
+              const offset = lookup.offset;
+              const caseName =
+                typeof offset === 'string'
+                  ? offset
+                  : offset.kind === 'identifier'
+                    ? (offset as PhpParserTypes.Identifier).name
+                    : null;
 
-    for (const labelMatch of labelMatches) {
-      const caseKey = labelMatch[1];
-      const labelValue = labelMatch[2];
-      const enumCase = cases.find((c) => c.key === caseKey);
-      if (enumCase) {
-        enumCase.label = labelValue;
+              if (caseName) {
+                const labelValue = getStringValue(arm.body);
+                if (labelValue !== null) {
+                  const enumCase = cases.find((c) => c.key === caseName);
+                  if (enumCase) {
+                    enumCase.label = labelValue;
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -64,65 +211,96 @@ export function parseEnumFile(enumPath: string): EnumDefinition | null {
 }
 
 /**
- * Parse PHP array pairs from a string like "'key' => 'value'".
+ * Extract key-value pairs from a PHP array node.
  */
-export function parsePhpArrayPairs(inside: string): Record<string, string> {
+function extractArrayPairs(arrayNode: PhpParserTypes.Array): Record<string, string> {
   const pairs: Record<string, string> = {};
-  const re = /["'](?<key>[A-Za-z0-9_]+)["']\s*=>\s*(?<val>[^,\n]+)/g;
 
-  for (const m of inside.matchAll(re)) {
-    let val = (m as any).groups.val.trim();
-    val = val.replace(/[,\s]*$/g, '');
+  for (const item of arrayNode.items) {
+    if (item.kind === 'entry') {
+      const entry = item as PhpParserTypes.Entry;
+      const key = entry.key ? getStringValue(entry.key) : null;
+      if (!key) continue;
 
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
+      const value = entry.value;
+      let strValue: string | null = null;
+
+      if (value.kind === 'string' || value.kind === 'number') {
+        strValue = getStringValue(value);
+      } else if (value.kind === 'staticlookup') {
+        // Handle Foo::class
+        const lookup = value as PhpParserTypes.StaticLookup;
+        const offset = lookup.offset;
+        if (
+          offset &&
+          offset.kind === 'identifier' &&
+          (offset as PhpParserTypes.Identifier).name === 'class'
+        ) {
+          const what = lookup.what;
+          if (what.kind === 'name') {
+            strValue = (what as PhpParserTypes.Name).name.replace(/^\\+/, '');
+          }
+        }
+      }
+
+      if (strValue !== null) {
+        pairs[key] = strValue;
+      }
     }
-
-    if (val.endsWith('::class')) {
-      val = val.slice(0, -7);
-    }
-
-    pairs[(m as any).groups.key] = val;
   }
 
   return pairs;
 }
 
 /**
- * Extract model casts from a PHP model file.
+ * Parse model casts from PHP model content.
+ * This is a pure function that takes PHP source code as input.
  */
-export function getModelCasts(modelPath: string): Record<string, string> {
-  const content = readFileSafe(modelPath);
-  if (!content) return {};
+export function parseModelCasts(phpContent: string): Record<string, string> {
+  const ast = parsePhp(phpContent);
+  if (!ast) return {};
 
-  // Try protected $casts property
-  const castsMatch = content.match(/protected\s+\$casts\s*=\s*\[([^\]]*)\]/s);
-  if (castsMatch) {
-    return parsePhpArrayPairs(castsMatch[1]);
+  // Find the class
+  const classNode = findNodeByKind(ast, 'class') as PhpParserTypes.Class | null;
+  if (!classNode) return {};
+
+  // Look for protected $casts property
+  const propertyStatements = findAllNodesByKind(classNode, 'propertystatement') as PhpParserTypes.PropertyStatement[];
+
+  for (const propStmt of propertyStatements) {
+    for (const prop of propStmt.properties) {
+      // prop.name can be a string or Identifier
+      const propName =
+        typeof prop.name === 'string'
+          ? prop.name
+          : (prop.name as unknown as PhpParserTypes.Identifier).name;
+      if (propName === 'casts' && prop.value && prop.value.kind === 'array') {
+        return extractArrayPairs(prop.value as PhpParserTypes.Array);
+      }
+    }
   }
 
-  // Try casts() method
-  const castsMethodMatch = content.match(/function\s+casts\s*\([^)]*\)\s*\{[^}]*return\s*\[([^\]]*)\]/s);
-  if (castsMethodMatch) {
-    return parsePhpArrayPairs(castsMethodMatch[1]);
+  // Look for casts() method
+  const methods = findAllNodesByKind(classNode, 'method') as PhpParserTypes.Method[];
+  const castsMethod = methods.find((m) => {
+    const methodName = typeof m.name === 'string' ? m.name : (m.name as PhpParserTypes.Identifier).name;
+    return methodName === 'casts';
+  });
+
+  if (castsMethod && castsMethod.body) {
+    // Find return statement with array
+    const returnNode = findNodeByKind(castsMethod.body, 'return') as PhpParserTypes.Return | null;
+    if (returnNode && returnNode.expr && returnNode.expr.kind === 'array') {
+      return extractArrayPairs(returnNode.expr as PhpParserTypes.Array);
+    }
   }
 
-  // Try class-based casts
-  const matches = [...content.matchAll(/["'](?<key>[A-Za-z0-9_]+)["']\s*=>\s*(?<class>[A-Za-z0-9_\\]+)::class/g)];
-  const res: Record<string, string> = {};
-
-  for (const m of matches) {
-    const k = (m as any).groups.key;
-    let v = (m as any).groups.class;
-    v = v.replace(/^\\+/, '');
-    res[k] = v;
-  }
-
-  return res;
+  return {};
 }
 
 /**
- * Extract docblock array shape from PHP file content.
+ * Extract docblock array shape from PHP content.
+ * This is a pure function that takes PHP source code as input.
  */
 export function extractDocblockArrayShape(phpContent: string): Record<string, string> | null {
   const match = phpContent.match(/@return\s+array\s*\{/s);
@@ -152,7 +330,10 @@ export function extractDocblockArrayShape(phpContent: string): Record<string, st
 
   if (endPos === null) return null;
 
-  const inside = phpContent.slice(openBracePos + 1, endPos);
+  // Extract content and strip docblock asterisks from multiline format
+  let inside = phpContent.slice(openBracePos + 1, endPos);
+  inside = inside.replace(/^\s*\*\s?/gm, '');
+
   const pairs: Record<string, string> = {};
   let i = 0;
 
@@ -196,7 +377,8 @@ export function extractDocblockArrayShape(phpContent: string): Record<string, st
 }
 
 /**
- * Extract the return array block from a toArray() method in a PHP resource.
+ * Extract the return array block from a toArray() method in PHP content.
+ * This is a pure function that takes PHP source code as input.
  */
 export function extractReturnArrayBlock(phpContent: string): string | null {
   const match = phpContent.match(/function\s+toArray\s*\([^)]*\)\s*:\s*array\s*\{([\s\S]*?)\n\s*\}/);
