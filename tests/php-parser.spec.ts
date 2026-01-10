@@ -228,7 +228,7 @@ describe('parseResourceFieldsAst', () => {
       slug: { type: 'string', optional: false },
       is_published: { type: 'boolean', optional: false },
       has_comments: { type: 'boolean', optional: false },
-      author: { type: 'UserResource[]', optional: true },
+      author: { type: 'UserResource', optional: true },
       comments: { type: 'CommentResource[]', optional: true },
       top_voted_comment: { type: 'CommentResource', optional: true },
       created_at: { type: 'string', optional: false },

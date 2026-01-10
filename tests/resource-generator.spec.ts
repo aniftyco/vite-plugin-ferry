@@ -280,7 +280,7 @@ describe('resource generation integration', () => {
           slug: string;
           is_published: boolean;
           has_comments: boolean;
-          author?: UserResource[];
+          author?: UserResource;
           comments?: any[];
           top_voted_comment?: any;
           created_at: string;

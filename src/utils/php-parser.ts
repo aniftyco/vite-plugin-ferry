@@ -546,12 +546,19 @@ function inferTypeFromAstNode(
       if (resource === 'Collection') {
         return { type: 'any[]', optional };
       }
-      // Resource::collection or Resource::make returns Resource[]
-      if (method === 'collection' || method === 'make') {
+      // Resource::collection returns Resource[] (array of resources)
+      if (method === 'collection') {
         if (resourceExists(resource, resourcesDir)) {
           return { type: `${resource}[]`, optional };
         }
         return { type: 'any[]', optional };
+      }
+      // Resource::make returns a single Resource
+      if (method === 'make') {
+        if (resourceExists(resource, resourcesDir)) {
+          return { type: resource, optional };
+        }
+        return { type: 'any', optional };
       }
     }
 
