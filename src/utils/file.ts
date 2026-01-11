@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 /**
  * Safely read a file, returning null if it doesn't exist or can't be read.
@@ -29,4 +29,18 @@ export function getPhpFiles(dir: string): string[] {
     return [];
   }
   return readdirSync(dir).filter((f) => f.endsWith('.php'));
+}
+
+/**
+ * Clean generated files from output directory, keeping package.json.
+ */
+export function cleanOutputDir(outputDir: string): void {
+  if (!existsSync(outputDir)) return;
+
+  const files = readdirSync(outputDir);
+  for (const file of files) {
+    if (file.endsWith('.d.ts') || file.endsWith('.js')) {
+      unlinkSync(join(outputDir, file));
+    }
+  }
 }
