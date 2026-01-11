@@ -1,6 +1,6 @@
 import ts from 'typescript';
 import { existsSync } from 'node:fs';
-import { join, parse } from 'node:path';
+import { join, parse, relative } from 'node:path';
 import { getPhpFiles, readFileSafe, writeFileEnsureDir, cleanOutputDir } from '../utils/file.js';
 import {
   extractDocblockArrayShape,
@@ -16,6 +16,11 @@ import {
   parseTypeString,
   createTypeLiteral,
 } from '../utils/ts-generator.js';
+import {
+  generateSourceMap,
+  createSourceMapComment,
+  type SourceMapping,
+} from '../utils/source-map.js';
 
 export type ResourceGeneratorOptions = {
   resourcesDir: string;
@@ -24,6 +29,7 @@ export type ResourceGeneratorOptions = {
   outputDir: string;
   packageName: string;
   prettyPrint?: boolean;
+  cwd: string;
 };
 
 // Re-export FieldInfo type from php-parser for backwards compatibility
@@ -36,7 +42,8 @@ export function generateSingleResourceTypeScript(
   className: string,
   fields: Record<string, ResourceFieldInfo>,
   isFallback: boolean,
-  referencedEnums: Set<string>
+  referencedEnums: Set<string>,
+  phpFile?: string
 ): string {
   const nodes: ts.Node[] = [];
 
@@ -77,56 +84,66 @@ export function generateSingleResourceTypeScript(
     nodes.push(createTypeAlias(className, createTypeLiteral(properties)));
   }
 
-  return nodes.map(printNode).join('\n\n') + '\n';
+  const lines: string[] = [];
+
+  // Add JSDoc with source reference
+  if (phpFile) {
+    lines.push(`/** @see ${phpFile} */`);
+  }
+
+  lines.push(nodes.map(printNode).join('\n\n'));
+
+  // Add source map comment
+  if (phpFile) {
+    lines.push(createSourceMapComment(`${className}.d.ts.map`));
+  }
+
+  return lines.join('\n') + '\n';
 }
 
 /**
- * Generate TypeScript type declarations for resources.
- * @deprecated Use generateSingleResourceTypeScript for individual files
+ * Generate source map for a single resource.
  */
-export function generateResourceTypeScript(
-  resources: Record<string, Record<string, ResourceFieldInfo>>,
-  fallbacks: string[],
-  referencedEnums: Set<string>
+export function generateResourceSourceMap(
+  className: string,
+  fields: Record<string, ResourceFieldInfo>,
+  generatedFile: string,
+  phpFile: string,
+  outputDir: string,
+  hasEnumImports: boolean
 ): string {
-  const nodes: ts.Node[] = [];
+  const mappings: SourceMapping[] = [];
 
-  // Import referenced enums from @app/enums
-  if (referencedEnums.size > 0) {
-    const enumImports = Array.from(referencedEnums).sort();
-    nodes.push(createImportType(enumImports, '@app/enums'));
+  // Calculate base line (after JSDoc comment and optional import)
+  let currentLine = 2; // Start after JSDoc comment
+  if (hasEnumImports) {
+    currentLine += 2; // Import statement + blank line
   }
 
-  // Generate resource types
-  for (const className of Object.keys(resources)) {
-    const fields = resources[className];
+  // Map each field to its source location
+  const fieldKeys = Object.keys(fields);
+  for (let i = 0; i < fieldKeys.length; i++) {
+    const key = fieldKeys[i];
+    const info = fields[key];
 
-    if (fallbacks.includes(className)) {
-      // Fallback type: Record<string, any>
-      const recordType = ts.factory.createTypeReferenceNode(ts.factory.createIdentifier('Record'), [
-        ts.factory.createKeywordTypeNode(ts.SyntaxKind.StringKeyword),
-        ts.factory.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword),
-      ]);
-      nodes.push(createTypeAlias(className, recordType));
-      continue;
+    if (info.loc) {
+      mappings.push({
+        generatedLine: currentLine + 1 + i, // +1 for the "export type X = {" line
+        generatedColumn: 4, // Indented
+        sourceLine: info.loc.line,
+        sourceColumn: info.loc.column || 0,
+      });
     }
-
-    // Create type literal with all fields
-    const properties = Object.keys(fields).map((key) => {
-      const info = fields[key];
-      return {
-        name: key,
-        type: parseTypeString(info.type || 'any'),
-        optional: info.optional,
-      };
-    });
-
-    nodes.push(createTypeAlias(className, createTypeLiteral(properties)));
   }
 
-  if (nodes.length === 0) return '';
+  // Calculate relative path from output dir to PHP file
+  const relativeSource = relative(outputDir, join(process.cwd(), phpFile)).replace(/\\/g, '/');
 
-  return nodes.map(printNode).join('\n\n') + '\n';
+  return generateSourceMap({
+    file: generatedFile,
+    sources: [relativeSource],
+    mappings,
+  });
 }
 
 /**
@@ -141,13 +158,14 @@ export function generateResourceRuntime(): string {
  * Generate resource type files (TypeScript declarations and runtime JavaScript).
  */
 export function generateResources(options: ResourceGeneratorOptions): void {
-  const { resourcesDir, enumsDir, modelsDir, outputDir, packageName } = options;
+  const { resourcesDir, enumsDir, modelsDir, outputDir, packageName, cwd } = options;
 
   // Clean existing generated files
   cleanOutputDir(outputDir);
 
   const collectedEnums: Record<string, EnumDefinition> = {};
   const resources: Record<string, Record<string, ResourceFieldInfo>> = {};
+  const resourcePhpFiles: Record<string, string> = {};
   const fallbacks: string[] = [];
 
   if (!existsSync(resourcesDir)) {
@@ -163,6 +181,9 @@ export function generateResources(options: ResourceGeneratorOptions): void {
       const content = readFileSafe(filePath) || '';
       const className = parse(file).name;
 
+      // Calculate relative path from project root for source mapping
+      const relativePhpPath = relative(cwd, filePath);
+
       const docShape = extractDocblockArrayShape(content);
       const mappedDocShape = docShape ? mapDocTypeToTsForShape(docShape) : null;
 
@@ -172,6 +193,7 @@ export function generateResources(options: ResourceGeneratorOptions): void {
         enumsDir,
         docShape: mappedDocShape,
         collectedEnums,
+        filePath: relativePhpPath,
       });
 
       if (!fields) {
@@ -180,6 +202,7 @@ export function generateResources(options: ResourceGeneratorOptions): void {
       } else {
         resources[className] = fields;
       }
+      resourcePhpFiles[className] = relativePhpPath;
     } catch (e) {
       console.warn(`Failed to parse resource file: ${file}`, e);
     }
@@ -193,10 +216,36 @@ export function generateResources(options: ResourceGeneratorOptions): void {
   for (const className of resourceNames) {
     const fields = resources[className];
     const isFallback = fallbacks.includes(className);
+    const phpFile = resourcePhpFiles[className];
 
-    // Generate {ResourceName}.d.ts
-    const dtsContent = generateSingleResourceTypeScript(className, fields, isFallback, referencedEnums);
+    // Check if this resource has enum imports
+    const usedEnums = new Set<string>();
+    for (const info of Object.values(fields)) {
+      const type = info.type || '';
+      for (const enumName of referencedEnums) {
+        if (type.includes(enumName)) {
+          usedEnums.add(enumName);
+        }
+      }
+    }
+    const hasEnumImports = usedEnums.size > 0;
+
+    // Generate {ResourceName}.d.ts with JSDoc and source map comment
+    const dtsContent = generateSingleResourceTypeScript(className, fields, isFallback, referencedEnums, phpFile);
     writeFileEnsureDir(join(outputDir, `${className}.d.ts`), dtsContent);
+
+    // Generate {ResourceName}.d.ts.map
+    if (phpFile && !isFallback) {
+      const sourceMap = generateResourceSourceMap(
+        className,
+        fields,
+        `${className}.d.ts`,
+        phpFile,
+        outputDir,
+        hasEnumImports
+      );
+      writeFileEnsureDir(join(outputDir, `${className}.d.ts.map`), sourceMap);
+    }
 
     // Generate {ResourceName}.js (empty export for type-only)
     writeFileEnsureDir(join(outputDir, `${className}.js`), 'export {};\n');
