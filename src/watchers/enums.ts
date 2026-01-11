@@ -11,7 +11,7 @@ export type EnumWatcherOptions = EnumGeneratorOptions & {
  * Set up a watcher for enum files.
  */
 export function setupEnumWatcher(options: EnumWatcherOptions): void {
-  const { enumsDir, outputDir, packageName, server } = options;
+  const { enumsDir, outputDir, packageName, cwd, server } = options;
 
   const enumPattern = join(enumsDir, '*.php');
   const generatedJsPath = join(outputDir, 'index.js');
@@ -28,7 +28,7 @@ export function setupEnumWatcher(options: EnumWatcherOptions): void {
         logFileChange('enums', basename(filePath));
 
         // Regenerate enum files
-        generateEnums({ enumsDir, outputDir, packageName });
+        generateEnums({ enumsDir, outputDir, packageName, cwd });
 
         // Tell Vite the generated file changed (triggers normal HMR)
         server.watcher.emit('change', generatedJsPath);

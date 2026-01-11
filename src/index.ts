@@ -45,6 +45,7 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin 
       outputDir: enumsOutputDir,
       packageName: `${namespace}/enums`,
       prettyPrint,
+      cwd,
     });
 
     // Generate @app/resources package
@@ -55,6 +56,7 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin 
       outputDir: resourcesOutputDir,
       packageName: `${namespace}/resources`,
       prettyPrint,
+      cwd,
     });
   }
 
@@ -93,6 +95,7 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin 
         enumsDir,
         outputDir: enumsOutputDir,
         packageName: `${namespace}/enums`,
+        cwd,
         server,
       });
 
@@ -103,6 +106,7 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin 
         modelsDir,
         outputDir: resourcesOutputDir,
         packageName: `${namespace}/resources`,
+        cwd,
         server,
       });
     },

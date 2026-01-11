@@ -11,7 +11,7 @@ export type ResourceWatcherOptions = ResourceGeneratorOptions & {
  * Set up a watcher for resource and model files.
  */
 export function setupResourceWatcher(options: ResourceWatcherOptions): void {
-  const { resourcesDir, enumsDir, modelsDir, outputDir, packageName, server } = options;
+  const { resourcesDir, enumsDir, modelsDir, outputDir, packageName, cwd, server } = options;
 
   const resourcePattern = join(resourcesDir, '*.php');
   const modelPattern = join(modelsDir, '*.php');
@@ -33,7 +33,7 @@ export function setupResourceWatcher(options: ResourceWatcherOptions): void {
         logFileChange(fileType, basename(filePath));
 
         // Regenerate resource types
-        generateResources({ resourcesDir, enumsDir, modelsDir, outputDir, packageName });
+        generateResources({ resourcesDir, enumsDir, modelsDir, outputDir, packageName, cwd });
 
         // Tell Vite the generated type file changed
         // TypeScript will pick up changes automatically
