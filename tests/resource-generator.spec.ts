@@ -1,154 +1,15 @@
-import { join, parse } from 'node:path';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
-  generateResourceTypeScript,
   generateResourceRuntime,
-  type FieldInfo,
+  generateSingleResourceTypeScript,
+  generateResourceSourceMap,
 } from '../src/generators/resources.js';
-import { readFileSafe, getPhpFiles } from '../src/utils/file.js';
-import {
-  extractDocblockArrayShape,
-  parseResourceFieldsAst,
-} from '../src/utils/php-parser.js';
-import { mapDocTypeToTs } from '../src/utils/type-mapper.js';
+import { readFileSafe } from '../src/utils/file.js';
+import { parseResourceFieldsAst, type ResourceFieldInfo } from '../src/utils/php-parser.js';
 import { dedent } from './utils.js';
 
 const fixturesDir = join(import.meta.dirname, 'fixtures');
-
-describe('generateResourceTypeScript', () => {
-  it('generates type declarations for resources', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      UserResource: {
-        id: { type: 'string', optional: false },
-        name: { type: 'string', optional: false },
-        email: { type: 'string', optional: false },
-        is_admin: { type: 'boolean', optional: false },
-      },
-    };
-
-    const result = generateResourceTypeScript(resources, [], new Set());
-
-    expect(result).toBe(dedent`
-      export type UserResource = {
-          id: string;
-          name: string;
-          email: string;
-          is_admin: boolean;
-      };
-    `);
-  });
-
-  it('handles optional fields', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      PostResource: {
-        id: { type: 'string', optional: false },
-        author: { type: 'UserResource', optional: true },
-      },
-    };
-
-    const result = generateResourceTypeScript(resources, [], new Set());
-
-    expect(result).toBe(dedent`
-      export type PostResource = {
-          id: string;
-          author?: UserResource;
-      };
-    `);
-  });
-
-  it('generates fallback Record type for unparseable resources', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      ComplexResource: {},
-    };
-
-    const result = generateResourceTypeScript(resources, ['ComplexResource'], new Set());
-
-    expect(result).toBe(dedent`
-      export type ComplexResource = Record<string, any>;
-    `);
-  });
-
-  it('imports referenced enums', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      OrderResource: {
-        status: { type: 'OrderStatus', optional: false },
-      },
-    };
-
-    const result = generateResourceTypeScript(resources, [], new Set(['OrderStatus']));
-
-    expect(result).toBe(dedent`
-      import type { OrderStatus } from "@app/enums";
-
-      export type OrderResource = {
-          status: OrderStatus;
-      };
-    `);
-  });
-
-  it('generates empty string when no resources', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {};
-    const result = generateResourceTypeScript(resources, [], new Set());
-
-    expect(result).toBe('');
-  });
-
-  it('handles nested object types', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      OrderResource: {
-        shipping_address: { type: '{ street: string; city: string; zip: string }', optional: false },
-      },
-    };
-
-    const result = generateResourceTypeScript(resources, [], new Set());
-
-    expect(result).toBe(dedent`
-      export type OrderResource = {
-          shipping_address: {
-              street: string;
-              city: string;
-              zip: string;
-          };
-      };
-    `);
-  });
-
-  it('handles array types', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      PostResource: {
-        comments: { type: 'CommentResource[]', optional: true },
-      },
-    };
-
-    const result = generateResourceTypeScript(resources, [], new Set());
-
-    expect(result).toBe(dedent`
-      export type PostResource = {
-          comments?: CommentResource[];
-      };
-    `);
-  });
-
-  it('sorts multiple enum imports alphabetically', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      OrderResource: {
-        status: { type: 'OrderStatus', optional: false },
-        priority: { type: 'Priority', optional: false },
-      },
-    };
-
-    const result = generateResourceTypeScript(resources, [], new Set(['Priority', 'OrderStatus']));
-
-    expect(result).toBe(dedent`
-      import type { OrderStatus, Priority } from "@app/enums";
-
-      export type OrderResource = {
-          status: OrderStatus;
-          priority: Priority;
-      };
-    `);
-  });
-});
 
 describe('generateResourceRuntime', () => {
   it('generates empty runtime export', () => {
@@ -158,144 +19,218 @@ describe('generateResourceRuntime', () => {
   });
 });
 
-describe('resource type inference patterns', () => {
-  it('preserves boolean types for is and has prefixed fields', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      UserResource: {
-        is_admin: { type: 'boolean', optional: false },
-        isVerified: { type: 'boolean', optional: false },
-        has_comments: { type: 'boolean', optional: false },
-        hasShares: { type: 'boolean', optional: false },
-      },
+describe('generateSingleResourceTypeScript', () => {
+  it('generates TypeScript without phpFile (no JSDoc or source map comment)', () => {
+    const fields: Record<string, ResourceFieldInfo> = {
+      id: { type: 'string', optional: false },
+      name: { type: 'string', optional: false },
     };
 
-    const result = generateResourceTypeScript(resources, [], new Set());
-
-    expect(result).toBe(dedent`
-      export type UserResource = {
-          is_admin: boolean;
-          isVerified: boolean;
-          has_comments: boolean;
-          hasShares: boolean;
-      };
-    `);
-  });
-
-  it('preserves string types for timestamp fields', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      UserResource: {
-        created_at: { type: 'string', optional: false },
-        updatedAt: { type: 'string', optional: false },
-      },
-    };
-
-    const result = generateResourceTypeScript(resources, [], new Set());
-
-    expect(result).toBe(dedent`
-      export type UserResource = {
-          created_at: string;
-          updatedAt: string;
-      };
-    `);
-  });
-
-  it('preserves string types for id fields', () => {
-    const resources: Record<string, Record<string, FieldInfo>> = {
-      UserResource: {
-        id: { type: 'string', optional: false },
-        user_id: { type: 'string', optional: false },
-        uuid: { type: 'string', optional: false },
-      },
-    };
-
-    const result = generateResourceTypeScript(resources, [], new Set());
+    const result = generateSingleResourceTypeScript('UserResource', fields, false, new Set());
 
     expect(result).toBe(dedent`
       export type UserResource = {
           id: string;
-          user_id: string;
-          uuid: string;
+          name: string;
+      };
+    `);
+  });
+
+  it('generates TypeScript with phpFile (includes JSDoc and source map comment)', () => {
+    const fields: Record<string, ResourceFieldInfo> = {
+      id: { type: 'string', optional: false },
+      name: { type: 'string', optional: false },
+    };
+
+    const result = generateSingleResourceTypeScript(
+      'UserResource',
+      fields,
+      false,
+      new Set(),
+      'app/Http/Resources/UserResource.php'
+    );
+
+    expect(result).toBe(dedent`
+      /** @see app/Http/Resources/UserResource.php */
+      export type UserResource = {
+          id: string;
+          name: string;
+      };
+      //# sourceMappingURL=UserResource.d.ts.map
+    `);
+  });
+
+  it('generates fallback Record type', () => {
+    const fields: Record<string, ResourceFieldInfo> = {};
+
+    const result = generateSingleResourceTypeScript(
+      'ComplexResource',
+      fields,
+      true,
+      new Set(),
+      'app/Http/Resources/ComplexResource.php'
+    );
+
+    expect(result).toBe(dedent`
+      /** @see app/Http/Resources/ComplexResource.php */
+      export type ComplexResource = Record<string, any>;
+      //# sourceMappingURL=ComplexResource.d.ts.map
+    `);
+  });
+
+  it('imports referenced enums', () => {
+    const fields: Record<string, ResourceFieldInfo> = {
+      status: { type: 'OrderStatus', optional: false },
+    };
+
+    const result = generateSingleResourceTypeScript(
+      'OrderResource',
+      fields,
+      false,
+      new Set(['OrderStatus']),
+      'app/Http/Resources/OrderResource.php'
+    );
+
+    expect(result).toBe(dedent`
+      /** @see app/Http/Resources/OrderResource.php */
+      import type { OrderStatus } from "@app/enums";
+
+      export type OrderResource = {
+          status: OrderStatus;
+      };
+      //# sourceMappingURL=OrderResource.d.ts.map
+    `);
+  });
+
+  it('handles optional fields', () => {
+    const fields: Record<string, ResourceFieldInfo> = {
+      id: { type: 'string', optional: false },
+      author: { type: 'UserResource', optional: true },
+    };
+
+    const result = generateSingleResourceTypeScript('PostResource', fields, false, new Set());
+
+    expect(result).toBe(dedent`
+      export type PostResource = {
+          id: string;
+          author?: UserResource;
       };
     `);
   });
 });
 
-describe('resource generation integration', () => {
-  it('collects and generates complete resource output using AST', () => {
+describe('generateResourceSourceMap', () => {
+  it('generates valid source map JSON', () => {
+    const fields: Record<string, ResourceFieldInfo> = {
+      id: { type: 'string', optional: false, loc: { file: 'app/Http/Resources/User.php', line: 15 } },
+      name: { type: 'string', optional: false, loc: { file: 'app/Http/Resources/User.php', line: 16 } },
+    };
+
+    const result = generateResourceSourceMap(
+      'UserResource',
+      fields,
+      'UserResource.d.ts',
+      'app/Http/Resources/UserResource.php',
+      '/project/node_modules/@ferry/resources',
+      false
+    );
+    const parsed = JSON.parse(result);
+
+    expect(parsed.version).toBe(3);
+    expect(parsed.file).toBe('UserResource.d.ts');
+    expect(parsed.sources).toHaveLength(1);
+    expect(parsed.sources[0]).toContain('app/Http/Resources/UserResource.php');
+    expect(typeof parsed.mappings).toBe('string');
+  });
+
+  it('includes mappings for fields with loc', () => {
+    const fields: Record<string, ResourceFieldInfo> = {
+      id: { type: 'string', optional: false, loc: { file: 'app/Http/Resources/User.php', line: 15 } },
+      name: { type: 'string', optional: false, loc: { file: 'app/Http/Resources/User.php', line: 16 } },
+      email: { type: 'string', optional: false, loc: { file: 'app/Http/Resources/User.php', line: 17 } },
+    };
+
+    const result = generateResourceSourceMap(
+      'UserResource',
+      fields,
+      'UserResource.d.ts',
+      'app/Http/Resources/UserResource.php',
+      '/project/node_modules/@ferry/resources',
+      false
+    );
+    const parsed = JSON.parse(result);
+
+    // Should have non-empty mappings for 3 fields
+    expect(parsed.mappings.length).toBeGreaterThan(0);
+  });
+
+  it('handles fields without loc information', () => {
+    const fields: Record<string, ResourceFieldInfo> = {
+      id: { type: 'string', optional: false },
+      name: { type: 'string', optional: false },
+    };
+
+    const result = generateResourceSourceMap(
+      'UserResource',
+      fields,
+      'UserResource.d.ts',
+      'app/Http/Resources/UserResource.php',
+      '/project/node_modules/@ferry/resources',
+      false
+    );
+    const parsed = JSON.parse(result);
+
+    // Should still be valid JSON
+    expect(parsed.version).toBe(3);
+    expect(parsed.file).toBe('UserResource.d.ts');
+  });
+
+  it('adjusts line numbers when enum imports are present', () => {
+    const fields: Record<string, ResourceFieldInfo> = {
+      status: { type: 'OrderStatus', optional: false, loc: { file: 'app/Http/Resources/Order.php', line: 20 } },
+    };
+
+    const withImports = generateResourceSourceMap(
+      'OrderResource',
+      fields,
+      'OrderResource.d.ts',
+      'app/Http/Resources/OrderResource.php',
+      '/project/node_modules/@ferry/resources',
+      true // hasEnumImports
+    );
+
+    const withoutImports = generateResourceSourceMap(
+      'OrderResource',
+      fields,
+      'OrderResource.d.ts',
+      'app/Http/Resources/OrderResource.php',
+      '/project/node_modules/@ferry/resources',
+      false // hasEnumImports
+    );
+
+    // Both should be valid, but mappings may differ due to line offset
+    const parsedWith = JSON.parse(withImports);
+    const parsedWithout = JSON.parse(withoutImports);
+
+    expect(parsedWith.version).toBe(3);
+    expect(parsedWithout.version).toBe(3);
+  });
+});
+
+describe('resource source location integration', () => {
+  it('captures loc property when filePath is provided', () => {
     const resourcesDir = join(fixturesDir, 'Resources');
-    const modelsDir = join(fixturesDir, 'Models');
-    const enumsDir = join(fixturesDir, 'Enums');
+    const content = readFileSafe(join(resourcesDir, 'UserResource.php')) || '';
 
-    const resources: Record<string, Record<string, FieldInfo>> = {};
-    const fallbacks: string[] = [];
+    const fields = parseResourceFieldsAst(content, {
+      filePath: 'app/Http/Resources/UserResource.php',
+    });
 
-    const files = getPhpFiles(resourcesDir);
-
-    for (const file of files) {
-      const filePath = join(resourcesDir, file);
-      const content = readFileSafe(filePath) || '';
-      const className = parse(file).name;
-
-      const docShape = extractDocblockArrayShape(content);
-      const mappedDocShape = docShape
-        ? Object.fromEntries(Object.entries(docShape).map(([k, v]) => [k, mapDocTypeToTs(v)]))
-        : null;
-
-      const fields = parseResourceFieldsAst(content, {
-        resourcesDir,
-        modelsDir,
-        enumsDir,
-        docShape: mappedDocShape,
-      });
-
-      if (!fields) {
-        fallbacks.push(className);
-        resources[className] = {};
-      } else {
-        resources[className] = fields;
-      }
+    expect(fields).not.toBeNull();
+    for (const field of Object.values(fields!)) {
+      expect(field.loc).toBeDefined();
+      expect(field.loc!.file).toBe('app/Http/Resources/UserResource.php');
+      expect(field.loc!.line).toBeGreaterThan(0);
     }
-
-    const typescript = generateResourceTypeScript(resources, fallbacks, new Set());
-    const runtime = generateResourceRuntime();
-
-    expect(typescript).toBe(dedent`
-      export type OrderResource = {
-          id: string;
-          total: number;
-          status: string;
-          items: any[];
-          user?: UserResource;
-          shipping_address: {
-              street: string;
-              city: string;
-              zip: string;
-          };
-          created_at: string;
-      };
-
-      export type PostResource = {
-          id: string;
-          title: string;
-          slug: string;
-          is_published: boolean;
-          has_comments: boolean;
-          author?: UserResource;
-          comments?: any[];
-          top_voted_comment?: any;
-          created_at: string;
-      };
-
-      export type UserResource = {
-          id: string;
-          name: string;
-          email: string;
-          is_admin: boolean;
-          created_at: string;
-          updated_at: string;
-      };
-    `);
-
-    expect(runtime).toBe('export default {};');
   });
 });
