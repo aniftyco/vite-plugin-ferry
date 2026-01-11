@@ -16,20 +16,28 @@ const parser = new PhpParser({
     php8: true,
   },
   ast: {
-    withPositions: false,
+    withPositions: true,
   },
 });
+
+export type SourceLocation = {
+  file: string;
+  line: number;
+  column?: number;
+};
 
 export type EnumCase = {
   key: string;
   value: string | number;
   label?: string;
+  loc?: SourceLocation;
 };
 
 export type EnumDefinition = {
   name: string;
   backing: string | null;
   cases: EnumCase[];
+  loc?: SourceLocation;
 };
 
 /**
@@ -127,7 +135,7 @@ function getStringValue(node: PhpParserTypes.Node): string | null {
  * Parse PHP enum content and extract its definition.
  * This is a pure function that takes PHP source code as input.
  */
-export function parseEnumContent(phpContent: string): EnumDefinition | null {
+export function parseEnumContent(phpContent: string, filePath?: string): EnumDefinition | null {
   const ast = parsePhp(phpContent);
   if (!ast) return null;
 
@@ -137,6 +145,11 @@ export function parseEnumContent(phpContent: string): EnumDefinition | null {
 
   const name = typeof enumNode.name === 'string' ? enumNode.name : (enumNode.name as PhpParserTypes.Identifier).name;
   const backing = enumNode.valueType ? (enumNode.valueType as PhpParserTypes.Identifier).name.toLowerCase() : null;
+
+  // Capture enum location
+  const enumLoc: SourceLocation | undefined = filePath && (enumNode as any).loc?.start
+    ? { file: filePath, line: (enumNode as any).loc.start.line, column: (enumNode as any).loc.start.column }
+    : undefined;
 
   // Extract enum cases
   const cases: EnumCase[] = [];
@@ -168,7 +181,12 @@ export function parseEnumContent(phpContent: string): EnumDefinition | null {
       value = key;
     }
 
-    cases.push({ key, value });
+    // Capture case location
+    const caseLoc: SourceLocation | undefined = filePath && (enumCase as any).loc?.start
+      ? { file: filePath, line: (enumCase as any).loc.start.line, column: (enumCase as any).loc.start.column }
+      : undefined;
+
+    cases.push({ key, value, loc: caseLoc });
   }
 
   // Parse label() method if it exists
@@ -212,7 +230,7 @@ export function parseEnumContent(phpContent: string): EnumDefinition | null {
     }
   }
 
-  return { name, backing, cases };
+  return { name, backing, cases, loc: enumLoc };
 }
 
 /**
@@ -384,6 +402,7 @@ export function extractDocblockArrayShape(phpContent: string): Record<string, st
 export type ResourceFieldInfo = {
   type: string;
   optional: boolean;
+  loc?: SourceLocation;
 };
 
 export type ResourceArrayEntry = {
@@ -399,6 +418,7 @@ export type ParseResourceOptions = {
   docShape?: Record<string, string> | null;
   collectedEnums?: Record<string, EnumDefinition>;
   resourceClass?: string;
+  filePath?: string;
 };
 
 /**
@@ -667,6 +687,7 @@ function parseArrayEntries(
   options: ParseResourceOptions = {}
 ): Record<string, ResourceArrayEntry> {
   const result: Record<string, ResourceArrayEntry> = {};
+  const { filePath } = options;
 
   for (const item of items) {
     if (item.kind !== 'entry') continue;
@@ -678,6 +699,16 @@ function parseArrayEntries(
     if (!key) continue;
 
     const fieldInfo = inferTypeFromAstNode(entry.value, key, options);
+
+    // Capture field location from the entry key
+    if (filePath && (entry.key as any).loc?.start) {
+      fieldInfo.loc = {
+        file: filePath,
+        line: (entry.key as any).loc.start.line,
+        column: (entry.key as any).loc.start.column,
+      };
+    }
+
     result[key] = { key, fieldInfo };
 
     // Handle nested arrays
