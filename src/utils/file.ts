@@ -39,7 +39,7 @@ export function cleanOutputDir(outputDir: string): void {
 
   const files = readdirSync(outputDir);
   for (const file of files) {
-    if (file.endsWith('.d.ts') || file.endsWith('.js')) {
+    if (file.endsWith('.d.ts') || file.endsWith('.js') || file.endsWith('.d.ts.map')) {
       unlinkSync(join(outputDir, file));
     }
   }
