@@ -1,6 +1,11 @@
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { generateEnumTypeScript, generateEnumRuntime, collectEnums } from '../src/generators/enums.js';
+import {
+  collectEnums,
+  generateSingleEnumTypeScript,
+  generateSingleEnumRuntime,
+  generateEnumSourceMap,
+} from '../src/generators/enums.js';
 import type { EnumDefinition } from '../src/utils/php-parser.js';
 import { dedent } from './utils.js';
 
@@ -8,59 +13,29 @@ const fixturesDir = join(import.meta.dirname, 'fixtures');
 
 describe('collectEnums', () => {
   it('collects all enums from directory', () => {
-    const enums = collectEnums(join(fixturesDir, 'Enums'));
+    const enums = collectEnums(join(fixturesDir, 'Enums'), fixturesDir);
 
     expect(Object.keys(enums).sort()).toEqual(['Color', 'OrderStatus', 'Priority', 'Role']);
   });
 
   it('returns empty object for non-existent directory', () => {
-    const enums = collectEnums('/non/existent/directory');
+    const enums = collectEnums('/non/existent/directory', '/');
     expect(enums).toEqual({});
   });
 });
 
-describe('generateEnumTypeScript', () => {
-  it('generates const declaration for enum with labels', () => {
-    const enums: Record<string, EnumDefinition> = {
-      OrderStatus: {
-        name: 'OrderStatus',
-        backing: 'string',
-        cases: [
-          { key: 'PENDING', value: 'pending', label: 'Pending Order' },
-          { key: 'APPROVED', value: 'approved', label: 'Approved' },
-        ],
-      },
+describe('generateSingleEnumTypeScript', () => {
+  it('generates TypeScript without phpFile (no JSDoc or source map comment)', () => {
+    const enumDef: EnumDefinition = {
+      name: 'Role',
+      backing: 'string',
+      cases: [
+        { key: 'ADMIN', value: 'admin' },
+        { key: 'USER', value: 'user' },
+      ],
     };
 
-    const result = generateEnumTypeScript(enums);
-
-    expect(result).toBe(dedent`
-      export declare const OrderStatus: {
-          PENDING: {
-              value: "pending";
-              label: "Pending Order";
-          };
-          APPROVED: {
-              value: "approved";
-              label: "Approved";
-          };
-      };
-    `);
-  });
-
-  it('generates traditional enum for enum without labels', () => {
-    const enums: Record<string, EnumDefinition> = {
-      Role: {
-        name: 'Role',
-        backing: 'string',
-        cases: [
-          { key: 'ADMIN', value: 'admin' },
-          { key: 'USER', value: 'user' },
-        ],
-      },
-    };
-
-    const result = generateEnumTypeScript(enums);
+    const result = generateSingleEnumTypeScript(enumDef);
 
     expect(result).toBe(dedent`
       export enum Role {
@@ -70,105 +45,42 @@ describe('generateEnumTypeScript', () => {
     `);
   });
 
-  it('generates numeric values for int-backed enums', () => {
-    const enums: Record<string, EnumDefinition> = {
-      Priority: {
-        name: 'Priority',
-        backing: 'int',
-        cases: [
-          { key: 'LOW', value: 1 },
-          { key: 'HIGH', value: 3 },
-        ],
-      },
+  it('generates TypeScript with phpFile (includes JSDoc and source map comment)', () => {
+    const enumDef: EnumDefinition = {
+      name: 'Role',
+      backing: 'string',
+      cases: [
+        { key: 'ADMIN', value: 'admin' },
+        { key: 'USER', value: 'user' },
+      ],
     };
 
-    const result = generateEnumTypeScript(enums);
+    const result = generateSingleEnumTypeScript(enumDef, 'app/Enums/Role.php');
 
     expect(result).toBe(dedent`
-      export enum Priority {
-          LOW = 1,
-          HIGH = 3
+      /** @see app/Enums/Role.php */
+      export enum Role {
+          ADMIN = "admin",
+          USER = "user"
       }
+      //# sourceMappingURL=Role.d.ts.map
     `);
   });
 
-  it('generates empty string when no enums', () => {
-    const enums: Record<string, EnumDefinition> = {};
-    const result = generateEnumTypeScript(enums);
-
-    expect(result).toBe('');
-  });
-});
-
-describe('generateEnumRuntime', () => {
-  it('generates runtime object for enum with labels', () => {
-    const enums: Record<string, EnumDefinition> = {
-      OrderStatus: {
-        name: 'OrderStatus',
-        backing: 'string',
-        cases: [{ key: 'PENDING', value: 'pending', label: 'Pending Order' }],
-      },
+  it('generates declare const for enum with labels', () => {
+    const enumDef: EnumDefinition = {
+      name: 'OrderStatus',
+      backing: 'string',
+      cases: [
+        { key: 'PENDING', value: 'pending', label: 'Pending Order' },
+        { key: 'APPROVED', value: 'approved', label: 'Approved' },
+      ],
     };
 
-    const result = generateEnumRuntime(enums);
+    const result = generateSingleEnumTypeScript(enumDef, 'app/Enums/OrderStatus.php');
 
     expect(result).toBe(dedent`
-      export const OrderStatus = {
-          PENDING: {
-              value: "pending",
-              label: "Pending Order"
-          }
-      };
-
-      export default {};
-    `);
-  });
-
-  it('generates runtime object for enum without labels', () => {
-    const enums: Record<string, EnumDefinition> = {
-      Role: {
-        name: 'Role',
-        backing: 'string',
-        cases: [
-          { key: 'ADMIN', value: 'admin' },
-          { key: 'USER', value: 'user' },
-        ],
-      },
-    };
-
-    const result = generateEnumRuntime(enums);
-
-    expect(result).toBe(dedent`
-      export const Role = {
-          ADMIN: "admin",
-          USER: "user"
-      };
-
-      export default {};
-    `);
-  });
-
-  it('exports default empty object when no enums', () => {
-    const enums: Record<string, EnumDefinition> = {};
-    const result = generateEnumRuntime(enums);
-
-    expect(result).toBe('export default {};\n');
-  });
-});
-
-describe('enum generation integration', () => {
-  it('collects and generates complete enum output', () => {
-    const enums = collectEnums(join(fixturesDir, 'Enums'));
-    const typescript = generateEnumTypeScript(enums);
-    const runtime = generateEnumRuntime(enums);
-
-    expect(typescript).toBe(dedent`
-      export enum Color {
-          RED = "RED",
-          GREEN = "GREEN",
-          BLUE = "BLUE"
-      }
-
+      /** @see app/Enums/OrderStatus.php */
       export declare const OrderStatus: {
           PENDING: {
               value: "pending";
@@ -178,37 +90,26 @@ describe('enum generation integration', () => {
               value: "approved";
               label: "Approved";
           };
-          REJECTED: {
-              value: "rejected";
-              label: "Rejected";
-          };
-          SHIPPED: {
-              value: "shipped";
-              label: "Shipped";
-          };
       };
-
-      export enum Priority {
-          LOW = 1,
-          MEDIUM = 2,
-          HIGH = 3,
-          URGENT = 4
-      }
-
-      export enum Role {
-          ADMIN = "admin",
-          USER = "user",
-          GUEST = "guest"
-      }
+      //# sourceMappingURL=OrderStatus.d.ts.map
     `);
+  });
+});
 
-    expect(runtime).toBe(dedent`
-      export const Color = {
-          RED: "RED",
-          GREEN: "GREEN",
-          BLUE: "BLUE"
-      };
+describe('generateSingleEnumRuntime', () => {
+  it('generates runtime object for enum with labels', () => {
+    const enumDef: EnumDefinition = {
+      name: 'OrderStatus',
+      backing: 'string',
+      cases: [
+        { key: 'PENDING', value: 'pending', label: 'Pending Order' },
+        { key: 'APPROVED', value: 'approved', label: 'Approved' },
+      ],
+    };
 
+    const result = generateSingleEnumRuntime(enumDef);
+
+    expect(result).toBe(dedent`
       export const OrderStatus = {
           PENDING: {
               value: "pending",
@@ -217,31 +118,132 @@ describe('enum generation integration', () => {
           APPROVED: {
               value: "approved",
               label: "Approved"
-          },
-          REJECTED: {
-              value: "rejected",
-              label: "Rejected"
-          },
-          SHIPPED: {
-              value: "shipped",
-              label: "Shipped"
           }
       };
+    `);
+  });
 
-      export const Priority = {
-          LOW: 1,
-          MEDIUM: 2,
-          HIGH: 3,
-          URGENT: 4
-      };
+  it('generates runtime object for enum without labels', () => {
+    const enumDef: EnumDefinition = {
+      name: 'Role',
+      backing: 'string',
+      cases: [
+        { key: 'ADMIN', value: 'admin' },
+        { key: 'USER', value: 'user' },
+      ],
+    };
 
+    const result = generateSingleEnumRuntime(enumDef);
+
+    expect(result).toBe(dedent`
       export const Role = {
           ADMIN: "admin",
-          USER: "user",
-          GUEST: "guest"
+          USER: "user"
       };
-
-      export default {};
     `);
+  });
+
+  it('generates runtime object for int-backed enum', () => {
+    const enumDef: EnumDefinition = {
+      name: 'Priority',
+      backing: 'int',
+      cases: [
+        { key: 'LOW', value: 1 },
+        { key: 'HIGH', value: 3 },
+      ],
+    };
+
+    const result = generateSingleEnumRuntime(enumDef);
+
+    expect(result).toBe(dedent`
+      export const Priority = {
+          LOW: 1,
+          HIGH: 3
+      };
+    `);
+  });
+});
+
+describe('generateEnumSourceMap', () => {
+  it('generates valid source map JSON', () => {
+    const enumDef: EnumDefinition = {
+      name: 'Role',
+      backing: 'string',
+      cases: [
+        { key: 'ADMIN', value: 'admin', loc: { file: 'app/Enums/Role.php', line: 8 } },
+        { key: 'USER', value: 'user', loc: { file: 'app/Enums/Role.php', line: 9 } },
+      ],
+      loc: { file: 'app/Enums/Role.php', line: 5 },
+    };
+
+    const result = generateEnumSourceMap(enumDef, 'Role.d.ts', 'app/Enums/Role.php', '/project/node_modules/@ferry/enums');
+    const parsed = JSON.parse(result);
+
+    expect(parsed.version).toBe(3);
+    expect(parsed.file).toBe('Role.d.ts');
+    expect(parsed.sources).toHaveLength(1);
+    expect(parsed.sources[0]).toContain('app/Enums/Role.php');
+    expect(typeof parsed.mappings).toBe('string');
+  });
+
+  it('includes mappings for enum declaration and cases', () => {
+    const enumDef: EnumDefinition = {
+      name: 'Priority',
+      backing: 'int',
+      cases: [
+        { key: 'LOW', value: 1, loc: { file: 'app/Enums/Priority.php', line: 10 } },
+        { key: 'HIGH', value: 3, loc: { file: 'app/Enums/Priority.php', line: 11 } },
+      ],
+      loc: { file: 'app/Enums/Priority.php', line: 5 },
+    };
+
+    const result = generateEnumSourceMap(enumDef, 'Priority.d.ts', 'app/Enums/Priority.php', '/project/node_modules/@ferry/enums');
+    const parsed = JSON.parse(result);
+
+    // Should have mappings for declaration + 2 cases = non-empty string
+    expect(parsed.mappings.length).toBeGreaterThan(0);
+  });
+
+  it('handles enum without loc information', () => {
+    const enumDef: EnumDefinition = {
+      name: 'Role',
+      backing: 'string',
+      cases: [
+        { key: 'ADMIN', value: 'admin' },
+        { key: 'USER', value: 'user' },
+      ],
+    };
+
+    const result = generateEnumSourceMap(enumDef, 'Role.d.ts', 'app/Enums/Role.php', '/project/node_modules/@ferry/enums');
+    const parsed = JSON.parse(result);
+
+    // Should still be valid JSON, just with empty mappings
+    expect(parsed.version).toBe(3);
+    expect(parsed.file).toBe('Role.d.ts');
+  });
+});
+
+describe('collectEnums source location', () => {
+  it('captures loc property on collected enums', () => {
+    const enums = collectEnums(join(fixturesDir, 'Enums'), fixturesDir);
+
+    // All enums should have loc property
+    for (const enumName of Object.keys(enums)) {
+      const enumDef = enums[enumName];
+      expect(enumDef.loc).toBeDefined();
+      expect(enumDef.loc!.file).toContain(`Enums/${enumName}.php`);
+      expect(enumDef.loc!.line).toBeGreaterThan(0);
+    }
+  });
+
+  it('captures loc property on enum cases', () => {
+    const enums = collectEnums(join(fixturesDir, 'Enums'), fixturesDir);
+
+    for (const enumDef of Object.values(enums)) {
+      for (const enumCase of enumDef.cases) {
+        expect(enumCase.loc).toBeDefined();
+        expect(enumCase.loc!.line).toBeGreaterThan(0);
+      }
+    }
   });
 });
