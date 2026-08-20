@@ -13,7 +13,6 @@ import { setupRouteWatcher } from './watchers/routes.js';
 
 export type ResourceTypesPluginOptions = {
   cwd?: string;
-  prettyPrint?: boolean;
   /**
    * Fallback type for resource fields ferry can't resolve statically. `false` (default)
    * → `any` (never breaks a typecheck); `true` → `unknown` (forces the consumer to narrow).
