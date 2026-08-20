@@ -260,6 +260,33 @@ describe('parseResourceFieldsAst', () => {
     expect(result!.user.optional).toBe(true);
   });
 
+  it('flattens a spread of an inline array and marks mergeWhen keys optional', () => {
+    const content = readFixture('Resources/InvoiceResource.php');
+    const result = parseResourceFieldsAst(content);
+
+    expect(result).not.toBeNull();
+
+    // Regular keyed fields still resolve.
+    expect(result!.id.type).toBe('string');
+    expect(result!.id.optional).toBe(false);
+    expect(result!.number.type).toBe('string');
+    expect(result!.number.optional).toBe(false);
+
+    // `...['currency' => ..., 'subtotal' => ...]` — spread keys are flattened into the
+    // shape and present unconditionally.
+    expect(result!.currency.type).toBe('string');
+    expect(result!.currency.optional).toBe(false);
+    expect(result!.subtotal.type).toBe('string');
+    expect(result!.subtotal.optional).toBe(false);
+
+    // `mergeWhen($cond, ['internal_note' => ..., 'reviewed_by' => ...])` — conditional, so
+    // its keys are contributed but optional.
+    expect(result!.internal_note.type).toBe('string');
+    expect(result!.internal_note.optional).toBe(true);
+    expect(result!.reviewed_by.type).toBe('string');
+    expect(result!.reviewed_by.optional).toBe(true);
+  });
+
   it('returns null for invalid PHP', () => {
     const result = parseResourceFieldsAst('not valid php');
     expect(result).toBeNull();
