@@ -2,6 +2,7 @@
   "name": "vite-plugin-ferry",
   "prettier": "@aniftyco/prettier",
   "description": "Ferries Laravel types to your TypeScript frontend",
+  "license": "MIT",
   "type": "module",
   "version": "0.0.0",
   "repository": "https://github.com/aniftyco/vite-plugin-ferry",
