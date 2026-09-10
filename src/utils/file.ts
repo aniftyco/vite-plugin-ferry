@@ -32,6 +32,27 @@ export function getPhpFiles(dir: string): string[] {
 }
 
 /**
+ * Get every PHP file under a directory, recursing into subdirectories. Returns absolute
+ * paths. Controllers nest under `app/Http/Controllers`, so a flat `readdir` misses them.
+ */
+export function getPhpFilesRecursive(dir: string): string[] {
+  if (!existsSync(dir)) {
+    return [];
+  }
+
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...getPhpFilesRecursive(full));
+    } else if (entry.isFile() && entry.name.endsWith('.php')) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+/**
  * Clean generated files from output directory, keeping package.json.
  */
 export function cleanOutputDir(outputDir: string): void {

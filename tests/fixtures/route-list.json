@@ -1,0 +1,9 @@
+[
+  { "domain": null, "method": "GET|HEAD", "uri": "/", "name": "home", "action": "App\\Http\\Controllers\\HomeController@index", "middleware": ["web"] },
+  { "domain": null, "method": "GET|HEAD", "uri": "users", "name": "users.index", "action": "App\\Http\\Controllers\\UserController@index", "middleware": ["web"] },
+  { "domain": null, "method": "GET|HEAD", "uri": "users/{user}", "name": "users.show", "action": "App\\Http\\Controllers\\UserController@show", "middleware": ["web"] },
+  { "domain": null, "method": "DELETE", "uri": "users/{user}", "name": "users.destroy", "action": "App\\Http\\Controllers\\UserController@destroy", "middleware": ["web"] },
+  { "domain": null, "method": "POST", "uri": "posts/{post}/comments/{comment?}", "name": "posts.comments.store", "action": "App\\Http\\Controllers\\CommentController@store", "middleware": ["web"] },
+  { "domain": null, "method": "GET|HEAD", "uri": "admin/users/{user}", "name": "admin.users.show", "action": "App\\Http\\Controllers\\Admin\\UserController@show", "middleware": ["web", "auth"] },
+  { "domain": null, "method": "GET|HEAD", "uri": "_ignition/health-check", "name": null, "action": "Spatie\\LaravelIgnition@check", "middleware": [] }
+]

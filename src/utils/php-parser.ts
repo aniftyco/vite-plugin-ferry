@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type * as PhpParserTypes from 'php-parser';
 import { readFileSafe } from './file.js';
 import { mapPhpTypeToTs } from './type-mapper.js';
+import { renderKey } from './ts-keys.js';
 
 // Import php-parser (CommonJS module with constructor)
 const require = createRequire(import.meta.url);
@@ -44,7 +45,7 @@ export type EnumDefinition = {
  * Parse PHP content and return the AST.
  * Uses parseEval which doesn't require <?php tags or filenames.
  */
-function parsePhp(content: string): PhpParserTypes.Program | null {
+export function parsePhp(content: string): PhpParserTypes.Program | null {
   try {
     // Strip <?php tag if present (parseEval expects raw PHP code)
     let code = content.trimStart();
@@ -82,7 +83,7 @@ function walkChildren(node: PhpParserTypes.Node, callback: (child: PhpParserType
 /**
  * Find a node by kind in the AST.
  */
-function findNodeByKind(ast: PhpParserTypes.Node, kind: string): PhpParserTypes.Node | null {
+export function findNodeByKind(ast: PhpParserTypes.Node, kind: string): PhpParserTypes.Node | null {
   if (ast.kind === kind) return ast;
 
   let result: PhpParserTypes.Node | null = null;
@@ -101,7 +102,7 @@ function findNodeByKind(ast: PhpParserTypes.Node, kind: string): PhpParserTypes.
 /**
  * Find all nodes of a specific kind in the AST.
  */
-function findAllNodesByKind(ast: PhpParserTypes.Node, kind: string): PhpParserTypes.Node[] {
+export function findAllNodesByKind(ast: PhpParserTypes.Node, kind: string): PhpParserTypes.Node[] {
   const results: PhpParserTypes.Node[] = [];
 
   function walk(node: PhpParserTypes.Node) {
@@ -147,9 +148,10 @@ export function parseEnumContent(phpContent: string, filePath?: string): EnumDef
   const backing = enumNode.valueType ? (enumNode.valueType as PhpParserTypes.Identifier).name.toLowerCase() : null;
 
   // Capture enum location
-  const enumLoc: SourceLocation | undefined = filePath && (enumNode as any).loc?.start
-    ? { file: filePath, line: (enumNode as any).loc.start.line, column: (enumNode as any).loc.start.column }
-    : undefined;
+  const enumLoc: SourceLocation | undefined =
+    filePath && (enumNode as any).loc?.start
+      ? { file: filePath, line: (enumNode as any).loc.start.line, column: (enumNode as any).loc.start.column }
+      : undefined;
 
   // Extract enum cases
   const cases: EnumCase[] = [];
@@ -157,10 +159,7 @@ export function parseEnumContent(phpContent: string, filePath?: string): EnumDef
 
   for (const enumCase of enumCases) {
     // Name can be an Identifier or string
-    const key =
-      typeof enumCase.name === 'string'
-        ? enumCase.name
-        : (enumCase.name as PhpParserTypes.Identifier).name;
+    const key = typeof enumCase.name === 'string' ? enumCase.name : (enumCase.name as PhpParserTypes.Identifier).name;
 
     let value: string | number;
     if (enumCase.value !== null && enumCase.value !== undefined) {
@@ -182,9 +181,10 @@ export function parseEnumContent(phpContent: string, filePath?: string): EnumDef
     }
 
     // Capture case location
-    const caseLoc: SourceLocation | undefined = filePath && (enumCase as any).loc?.start
-      ? { file: filePath, line: (enumCase as any).loc.start.line, column: (enumCase as any).loc.start.column }
-      : undefined;
+    const caseLoc: SourceLocation | undefined =
+      filePath && (enumCase as any).loc?.start
+        ? { file: filePath, line: (enumCase as any).loc.start.line, column: (enumCase as any).loc.start.column }
+        : undefined;
 
     cases.push({ key, value, loc: caseLoc });
   }
@@ -254,11 +254,7 @@ function extractArrayPairs(arrayNode: PhpParserTypes.Array): Record<string, stri
         // Handle Foo::class
         const lookup = value as PhpParserTypes.StaticLookup;
         const offset = lookup.offset;
-        if (
-          offset &&
-          offset.kind === 'identifier' &&
-          (offset as PhpParserTypes.Identifier).name === 'class'
-        ) {
+        if (offset && offset.kind === 'identifier' && (offset as PhpParserTypes.Identifier).name === 'class') {
           const what = lookup.what;
           if (what.kind === 'name') {
             strValue = (what as PhpParserTypes.Name).name.replace(/^\\+/, '');
@@ -294,9 +290,7 @@ export function parseModelCasts(phpContent: string): Record<string, string> {
     for (const prop of propStmt.properties) {
       // prop.name can be a string or Identifier
       const propName =
-        typeof prop.name === 'string'
-          ? prop.name
-          : (prop.name as unknown as PhpParserTypes.Identifier).name;
+        typeof prop.name === 'string' ? prop.name : (prop.name as unknown as PhpParserTypes.Identifier).name;
       if (propName === 'casts' && prop.value && prop.value.kind === 'array') {
         return extractArrayPairs(prop.value as PhpParserTypes.Array);
       }
@@ -403,6 +397,12 @@ export type ResourceFieldInfo = {
   type: string;
   optional: boolean;
   loc?: SourceLocation;
+  /** The model property this field reads (`$this->resource->prop`), when known. Lets the
+   * metadata dump override the static leaf type with the real column/cast type. */
+  column?: string;
+  /** True when the value is an arbitrary expression ferry can't resolve statically (a
+   * method call, a loop-built array, etc.). Signals the caller to degrade the type. */
+  undecidable?: boolean;
 };
 
 export type ResourceArrayEntry = {
@@ -537,7 +537,11 @@ function resourceExists(resourceName: string, resourcesDir: string | undefined):
 /**
  * Infer TypeScript type from an AST value node.
  */
-function inferTypeFromAstNode(
+export function getNodeStringValue(node: PhpParserTypes.Node): string | null {
+  return getStringValue(node);
+}
+
+export function inferTypeFromAstNode(
   node: PhpParserTypes.Node,
   key: string,
   options: ParseResourceOptions = {}
@@ -624,12 +628,12 @@ function inferTypeFromAstNode(
 
     // Boolean checks
     if (lower.startsWith('is_') || lower.startsWith('has_') || /^(is|has)[A-Z]/.test(prop)) {
-      return { type: 'boolean', optional: false };
+      return { type: 'boolean', optional: false, column: prop };
     }
 
     // IDs and UUIDs
     if (prop === 'id' || prop.endsWith('_id') || lower === 'uuid' || prop.endsWith('Id')) {
-      return { type: 'string', optional: false };
+      return { type: 'string', optional: false, column: prop };
     }
 
     // Check model casts
@@ -648,7 +652,7 @@ function inferTypeFromAstNode(
               trim.startsWith('{') || trim.includes(':') || /array\s*\{/.test(trim)
                 ? trim
                 : mapCastToType(cast, enumsDir || '', collectedEnums);
-            return { type: tsType, optional: false };
+            return { type: tsType, optional: false, column: prop };
           }
         }
       }
@@ -656,10 +660,10 @@ function inferTypeFromAstNode(
 
     // Timestamps
     if (prop.endsWith('_at') || prop.endsWith('At')) {
-      return { type: 'string', optional: false };
+      return { type: 'string', optional: false, column: prop };
     }
 
-    return { type: 'string', optional: false };
+    return { type: 'string', optional: false, column: prop };
   }
 
   // Handle nested arrays
@@ -669,14 +673,59 @@ function inferTypeFromAstNode(
     if (Object.keys(nestedFields).length > 0) {
       const props = Object.entries(nestedFields).map(([k, v]) => {
         const opt = v.fieldInfo.optional ? '?' : '';
-        return `${k}${opt}: ${v.fieldInfo.type}`;
+        return `${renderKey(k)}${opt}: ${v.fieldInfo.type}`;
       });
       return { type: `{ ${props.join('; ')} }`, optional };
     }
     return { type: 'any[]', optional };
   }
 
-  return { type: 'any', optional };
+  // Arbitrary expression ferry can't resolve statically (method call, ternary of two
+  // shapes, loop-built array, etc.): mark it so the caller degrades the type.
+  return { type: 'any', optional, undecidable: true };
+}
+
+/**
+ * Flatten a keyless array item into the fields it contributes. Two documented cases:
+ *
+ * - A spread of an inline array literal (`...['a' => 1]`) — its keys are present
+ *   unconditionally, so they keep their inferred optionality.
+ * - `mergeWhen($cond, [...])` — the merge is conditional, so every contributed key is
+ *   marked optional, matching the `when()`/`whenLoaded()` convention.
+ *
+ * Anything else (a spread of a runtime expression whose keys ferry can't see statically)
+ * contributes nothing.
+ */
+function flattenKeylessEntry(
+  entry: PhpParserTypes.Entry,
+  options: ParseResourceOptions
+): Record<string, ResourceArrayEntry> {
+  // Spread of an inline array literal: `...['a' => 1]`.
+  if ((entry as any).unpack && entry.value.kind === 'array') {
+    return parseArrayEntries((entry.value as PhpParserTypes.Array).items, options);
+  }
+
+  // `mergeWhen($cond, [...])` — conditional, so contributed keys become optional.
+  if (entry.value.kind === 'call') {
+    const call = entry.value as PhpParserTypes.Call;
+    if (call.what.kind === 'propertylookup') {
+      const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
+      const offset = lookup.offset;
+      const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+      if (name === 'mergeWhen') {
+        const arrayArg = call.arguments.find((a) => a.kind === 'array') as PhpParserTypes.Array | undefined;
+        if (arrayArg) {
+          const nested = parseArrayEntries(arrayArg.items, options);
+          for (const v of Object.values(nested)) {
+            v.fieldInfo.optional = true;
+          }
+          return nested;
+        }
+      }
+    }
+  }
+
+  return {};
 }
 
 /**
@@ -693,7 +742,15 @@ function parseArrayEntries(
     if (item.kind !== 'entry') continue;
 
     const entry = item as PhpParserTypes.Entry;
-    if (!entry.key) continue;
+
+    // A keyless item is a spread (`...['a' => 1]`) or a `mergeWhen($cond, [...])`: flatten
+    // the keys it contributes into this shape rather than dropping it.
+    if (!entry.key) {
+      for (const [k, v] of Object.entries(flattenKeylessEntry(entry, options))) {
+        result[k] = v;
+      }
+      continue;
+    }
 
     const key = getStringValue(entry.key);
     if (!key) continue;
@@ -740,9 +797,7 @@ export function parseResourceFieldsAst(
 
   // Extract class name for model cast lookups
   const className =
-    typeof classNode.name === 'string'
-      ? classNode.name
-      : (classNode.name as PhpParserTypes.Identifier).name;
+    typeof classNode.name === 'string' ? classNode.name : (classNode.name as PhpParserTypes.Identifier).name;
 
   // Find toArray method
   const methods = findAllNodesByKind(classNode, 'method') as PhpParserTypes.Method[];
@@ -764,6 +819,30 @@ export function parseResourceFieldsAst(
   const result: Record<string, ResourceFieldInfo> = {};
   for (const [key, entry] of Object.entries(entries)) {
     result[key] = entry.fieldInfo;
+  }
+
+  return result;
+}
+
+/**
+ * Read `@ferry <field> <TS type>` docblock tags — the annotation escape hatch. Each
+ * line pins one field to a raw TypeScript type, emitted verbatim (no inference). The
+ * type is the rest of the line, so it may contain spaces (`Record<string, string>`).
+ * Returns a map of field name to its raw TS type.
+ */
+export function extractFerryAnnotations(phpContent: string): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  for (const rawLine of phpContent.split('\n')) {
+    // Strip a leading docblock asterisk so ` * @ferry ...` matches too.
+    const line = rawLine.replace(/^\s*\*\s?/, '').trim();
+    const match = line.match(/^@ferry\s+([A-Za-z0-9_]+)\s+(.+)$/);
+    if (!match) continue;
+
+    const field = match[1];
+    // Drop a trailing `*/` if the tag sits on the docblock's closing line.
+    const type = match[2].replace(/\*\/\s*$/, '').trim();
+    if (type) result[field] = type;
   }
 
   return result;

@@ -1,0 +1,24 @@
+{
+  "Order": {
+    "table": "orders",
+    "columns": [
+      { "name": "id", "type_name": "bigint", "nullable": false, "default": null },
+      { "name": "total", "type_name": "decimal", "nullable": false, "default": null },
+      { "name": "status", "type_name": "varchar", "nullable": false, "default": null },
+      { "name": "state", "type_name": "varchar", "nullable": true, "default": null },
+      { "name": "settings", "type_name": "json", "nullable": true, "default": null },
+      { "name": "payload", "type_name": "json", "nullable": false, "default": null },
+      { "name": "notes", "type_name": "text", "nullable": true, "default": null },
+      { "name": "created_at", "type_name": "datetime", "nullable": true, "default": null }
+    ],
+    "casts": {
+      "id": "integer",
+      "status": "App\\Enums\\OrderStatus",
+      "state": "App\\Enums\\OrderStatus",
+      "total": "decimal:2",
+      "settings": "array",
+      "payload": "Illuminate\\Database\\Eloquent\\Casts\\AsCollection",
+      "is_gift": "boolean"
+    }
+  }
+}

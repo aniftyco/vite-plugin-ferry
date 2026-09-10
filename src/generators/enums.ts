@@ -1,145 +1,111 @@
-import ts from 'typescript';
 import { existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { getPhpFiles, readFileSafe, writeFileEnsureDir, cleanOutputDir } from '../utils/file.js';
-import { parseEnumContent, type EnumDefinition } from '../utils/php-parser.js';
-import {
-  createEnum,
-  createConstObject,
-  createObjectLiteral,
-  createDeclareConstWithType,
-  createTypeLiteral,
-  createStringLiteral,
-  createNumericLiteral,
-  printNode,
-} from '../utils/ts-generator.js';
-import {
-  generateSourceMap,
-  createSourceMapComment,
-  type SourceMapping,
-} from '../utils/source-map.js';
+import type { Delivery } from '../delivery/index.js';
+import { getPhpFiles, readFileSafe } from '../utils/file.js';
+import { parseEnumContent, type EnumCase, type EnumDefinition } from '../utils/php-parser.js';
 
-export type EnumGeneratorOptions = {
+export type EnumRegisterOptions = {
   enumsDir: string;
-  outputDir: string;
-  packageName: string;
-  prettyPrint?: boolean;
   cwd: string;
+  delivery: Delivery;
 };
 
-/**
- * Generate TypeScript type declaration for a single enum.
- */
-export function generateSingleEnumTypeScript(enumDef: EnumDefinition, phpFile?: string): string {
-  const hasLabels = enumDef.cases.some((c) => c.label);
+/** The ferry virtual/type module id enums are delivered under. */
+export const ENUMS_MODULE_ID = '@ferry/enums';
 
-  let node: ts.Node;
-  if (hasLabels) {
-    const properties = enumDef.cases.map((c) => ({
-      name: c.key,
-      type: createTypeLiteral([
-        { name: 'value', type: ts.factory.createLiteralTypeNode(createStringLiteral(String(c.value))) },
-        {
-          name: 'label',
-          type: ts.factory.createLiteralTypeNode(createStringLiteral(c.label || String(c.value))),
-        },
-      ]),
-    }));
-    node = createDeclareConstWithType(enumDef.name, createTypeLiteral(properties));
-  } else {
-    node = createEnum(enumDef.name, enumDef.cases.map((c) => ({ key: c.key, value: c.value })));
-  }
+/** Escape a value for embedding inside a single-quoted JS/TS string literal. */
+function escapeSingle(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
 
-  const lines: string[] = [];
+/** Render an enum value as a JS/TS literal: numbers stay numeric, strings get quoted. */
+function renderValue(value: string | number): string {
+  return typeof value === 'number' ? String(value) : `'${escapeSingle(value)}'`;
+}
 
-  // Add JSDoc with source reference
-  if (phpFile) {
-    lines.push(`/** @see ${phpFile} */`);
-  }
-
-  lines.push(printNode(node));
-
-  // Add source map comment
-  if (phpFile) {
-    lines.push(createSourceMapComment(`${enumDef.name}.d.ts.map`));
-  }
-
-  return lines.join('\n') + '\n';
+/** Collect enum definitions in a stable, name-sorted order for deterministic output. */
+function sortedDefs(enums: Record<string, EnumDefinition>): EnumDefinition[] {
+  return Object.keys(enums)
+    .sort()
+    .map((name) => enums[name]);
 }
 
 /**
- * Generate source map for a single enum.
+ * Runtime for a single enum: a class extending the base `Enum`, one frozen static
+ * instance per case. The label is passed only when the PHP enum defines `label()`.
  */
-export function generateEnumSourceMap(
-  enumDef: EnumDefinition,
-  generatedFile: string,
-  phpFile: string,
-  outputDir: string
-): string {
-  const mappings: SourceMapping[] = [];
-
-  // Map enum declaration to its source location
-  if (enumDef.loc) {
-    mappings.push({
-      generatedLine: 2, // Line after JSDoc comment
-      generatedColumn: 0,
-      sourceLine: enumDef.loc.line,
-      sourceColumn: enumDef.loc.column || 0,
-    });
-  }
-
-  // Map each enum case to its source location
-  const hasLabels = enumDef.cases.some((c) => c.label);
-  let currentLine = 3; // Start after "export enum Name {" or "export declare const Name: {"
-
-  for (const enumCase of enumDef.cases) {
-    if (enumCase.loc) {
-      mappings.push({
-        generatedLine: currentLine,
-        generatedColumn: 4, // Indented
-        sourceLine: enumCase.loc.line,
-        sourceColumn: enumCase.loc.column || 0,
-      });
+export function generateEnumRuntimeClass(def: EnumDefinition): string {
+  const cases = def.cases.map((c: EnumCase) => {
+    const args = [`'${escapeSingle(c.key)}'`, renderValue(c.value)];
+    if (c.label !== undefined) {
+      args.push(`'${escapeSingle(c.label)}'`);
     }
-    // For labeled enums, each case takes multiple lines
-    currentLine += hasLabels ? 4 : 1;
-  }
-
-  // Calculate relative path from output dir to PHP file
-  const relativeSource = relative(outputDir, join(process.cwd(), phpFile)).replace(/\\/g, '/');
-
-  return generateSourceMap({
-    file: generatedFile,
-    sources: [relativeSource],
-    mappings,
+    return `  static ${c.key} = new ${def.name}(${args.join(', ')});`;
   });
+
+  return [`export class ${def.name} extends Enum {`, ...cases, '}'].join('\n');
 }
 
 /**
- * Generate runtime JavaScript for a single enum.
+ * The full `@ferry/enums` runtime module: the base-class import plus every generated
+ * enum class. Served as a Vite virtual module.
  */
-export function generateSingleEnumRuntime(enumDef: EnumDefinition, prettyPrint = true): string {
-  const hasLabels = enumDef.cases.some((c) => c.label);
+export function generateEnumsRuntime(enums: Record<string, EnumDefinition>): string {
+  const defs = sortedDefs(enums);
+  if (defs.length === 0) {
+    return 'export {};\n';
+  }
 
-  const properties = enumDef.cases.map((c) => {
-    let value: ts.Expression;
-    if (hasLabels) {
-      value = createObjectLiteral(
-        [
-          { key: 'value', value: createStringLiteral(String(c.value)) },
-          { key: 'label', value: createStringLiteral(c.label || String(c.value)) },
-        ],
-        prettyPrint
-      );
-    } else if (typeof c.value === 'number') {
-      value = createNumericLiteral(c.value);
-    } else {
-      value = createStringLiteral(String(c.value));
-    }
-    return { key: c.key, value };
-  });
+  const classes = defs.map(generateEnumRuntimeClass).join('\n\n');
+  return `import { Enum } from '@ferry/enum';\n\n${classes}\n`;
+}
 
-  return printNode(createConstObject(enumDef.name, properties)) + '\n';
+/**
+ * Types for a single enum: the narrowed value union and a class extending
+ * `Enum<Value>` with statics narrowed to this enum's own value/key literals.
+ */
+export function generateEnumDtsClass(def: EnumDefinition): string {
+  const name = def.name;
+  const valueType = `${name}Value`;
+  const valueUnion = def.cases.map((c) => renderValue(c.value)).join(' | ');
+  const keyUnion = def.cases.map((c) => `'${escapeSingle(c.key)}'`).join(' | ');
+
+  return [
+    `export type ${valueType} = ${valueUnion};`,
+    `export class ${name} extends Enum<${valueType}> {`,
+    ...def.cases.map((c) => `  static readonly ${c.key}: ${name};`),
+    `  readonly key: ${keyUnion};`,
+    `  readonly value: ${valueType};`,
+    `  readonly label: string | undefined;`,
+    `  static from(value: ${valueType}): ${name};`,
+    `  static values(): ${valueType}[];`,
+    `  static keys(): Array<${keyUnion}>;`,
+    `  static cases(): ${name}[];`,
+    `  static options(): Array<{ value: ${valueType}; label: string | undefined }>;`,
+    `}`,
+  ].join('\n');
+}
+
+/** Indent every non-empty line of a block by two spaces. */
+function indentBlock(block: string): string {
+  return block
+    .split('\n')
+    .map((line) => (line.length > 0 ? `  ${line}` : line))
+    .join('\n');
+}
+
+/**
+ * The `declare module '@ferry/enums'` block for the ambient `index.d.ts`. The base
+ * `Enum` import lives inside the block, which keeps the ambient file script-style.
+ */
+export function generateEnumsDts(enums: Record<string, EnumDefinition>): string {
+  const defs = sortedDefs(enums);
+  if (defs.length === 0) {
+    return `declare module '${ENUMS_MODULE_ID}' {}`;
+  }
+
+  const inner = [`import { Enum } from '@ferry/enum';`, '', defs.map(generateEnumDtsClass).join('\n\n')].join('\n');
+  return `declare module '${ENUMS_MODULE_ID}' {\n${indentBlock(inner)}\n}`;
 }
 
 /**
@@ -177,57 +143,12 @@ export function collectEnums(enumsDir: string, cwd: string): Record<string, Enum
 }
 
 /**
- * Generate enum files (TypeScript declarations and runtime JavaScript).
+ * Collect enums and register their runtime (virtual module) and types (d.ts block)
+ * with the delivery layer under `@ferry/enums`. Called on every generation pass and
+ * on enum changes in dev. Does not write the ambient file; the caller runs `writeTypes()`.
  */
-export function generateEnums(options: EnumGeneratorOptions): void {
-  const { enumsDir, outputDir, packageName, prettyPrint = true, cwd } = options;
-
-  // Clean existing generated files
-  cleanOutputDir(outputDir);
-
-  // Collect all enums
+export function registerEnums({ enumsDir, cwd, delivery }: EnumRegisterOptions): void {
   const enums = collectEnums(enumsDir, cwd);
-  const enumNames = Object.keys(enums);
-
-  // Generate individual files for each enum
-  for (const enumName of enumNames) {
-    const enumDef = enums[enumName];
-    const phpFile = enumDef.loc?.file;
-
-    // Generate {EnumName}.d.ts with JSDoc and source map comment
-    const dtsContent = generateSingleEnumTypeScript(enumDef, phpFile);
-    writeFileEnsureDir(join(outputDir, `${enumName}.d.ts`), dtsContent);
-
-    // Generate {EnumName}.d.ts.map
-    if (phpFile) {
-      const sourceMap = generateEnumSourceMap(enumDef, `${enumName}.d.ts`, phpFile, outputDir);
-      writeFileEnsureDir(join(outputDir, `${enumName}.d.ts.map`), sourceMap);
-    }
-
-    // Generate {EnumName}.js
-    const jsContent = generateSingleEnumRuntime(enumDef, prettyPrint);
-    writeFileEnsureDir(join(outputDir, `${enumName}.js`), jsContent);
-  }
-
-  // Generate barrel index.d.ts
-  const indexDts = enumNames.map((n) => `export { ${n} } from './${n}.js';`).join('\n') + '\n';
-  writeFileEnsureDir(join(outputDir, 'index.d.ts'), indexDts);
-
-  // Generate barrel index.js
-  const indexJs = enumNames.map((n) => `export { ${n} } from './${n}.js';`).join('\n') + '\n';
-  writeFileEnsureDir(join(outputDir, 'index.js'), indexJs);
-
-  // Generate package.json
-  const pkgJson = JSON.stringify(
-    {
-      name: packageName,
-      version: '0.0.0',
-      main: 'index.js',
-      types: 'index.d.ts',
-    },
-    null,
-    2
-  );
-  const pkgPath = join(outputDir, 'package.json');
-  writeFileEnsureDir(pkgPath, pkgJson);
+  delivery.virtual.register(ENUMS_MODULE_ID, generateEnumsRuntime(enums));
+  delivery.dts.register(ENUMS_MODULE_ID, generateEnumsDts(enums));
 }

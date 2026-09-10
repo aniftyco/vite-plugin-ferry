@@ -19,6 +19,14 @@ export function logRegeneration(packageName: string): void {
 }
 
 /**
+ * Log a warning.
+ */
+export function logWarn(packageName: string, message: string): void {
+  const pkgLabel = pc.yellow(`[${packageName}]`);
+  console.warn(`${pkgLabel} ${pc.yellow('⚠')} ${message}`);
+}
+
+/**
  * Log an error.
  */
 export function logError(packageName: string, message: string, error?: any): void {

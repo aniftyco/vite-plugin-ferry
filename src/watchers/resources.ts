@@ -1,50 +1,54 @@
 import { join, basename } from 'node:path';
 import type { ViteDevServer } from 'vite';
-import { generateResources, type ResourceGeneratorOptions } from '../generators/resources.js';
+import type { Delivery } from '../delivery/index.js';
+import { VIRTUAL_PREFIX } from '../delivery/index.js';
+import { registerResources, RESOURCES_MODULE_ID } from '../generators/resources.js';
+import { getPhpFiles, getPhpFilesRecursive } from '../utils/file.js';
 import { logError, logFileChange, logRegeneration } from '../utils/banner.js';
+import { setupFileWatcher } from './watch.js';
 
-export type ResourceWatcherOptions = ResourceGeneratorOptions & {
+export type ResourceWatcherOptions = {
+  resourcesDir: string;
+  modelsDir: string;
+  cwd: string;
+  delivery: Delivery;
   server: ViteDevServer;
+  strict?: boolean;
 };
 
 /**
- * Set up a watcher for resource and model files.
+ * Watch the app's resource and model files. On adding, editing, or deleting one it re-collects
+ * and re-merges the resources, re-registers the `@ferry/resources` virtual module and its d.ts
+ * block, rewrites the ambient types, and invalidates the virtual module in Vite's graph —
+ * resource types are type-only, so invalidating the one module (with a full-reload fallback) is
+ * enough. Resources are watched recursively to match the recursive collection in the generator.
  */
 export function setupResourceWatcher(options: ResourceWatcherOptions): void {
-  const { resourcesDir, enumsDir, modelsDir, outputDir, packageName, cwd, server } = options;
+  const { resourcesDir, modelsDir, cwd, delivery, server, strict } = options;
 
-  const resourcePattern = join(resourcesDir, '*.php');
-  const modelPattern = join(modelsDir, '*.php');
-  const generatedDtsPath = join(outputDir, 'index.d.ts');
-
-  // Watch PHP resource and model files
-  server.watcher.add(resourcePattern);
-  server.watcher.add(modelPattern);
-
-  // Also watch the generated .d.ts file
-  server.watcher.add(generatedDtsPath);
-
-  const handleChange = (filePath: string) => {
-    if (filePath.startsWith(resourcesDir) || filePath.startsWith(modelsDir)) {
+  setupFileWatcher(server, {
+    patterns: [join(resourcesDir, '**/*.php'), join(modelsDir, '*.php')],
+    initialFiles: [...getPhpFilesRecursive(resourcesDir), ...getPhpFiles(modelsDir).map((f) => join(modelsDir, f))],
+    owns: (filePath) => filePath.startsWith(resourcesDir) || filePath.startsWith(modelsDir),
+    onChange: (filePath) => {
       try {
-        const isModel = filePath.startsWith(modelsDir);
-        const fileType = isModel ? 'model' : 'resource';
-
+        const fileType = filePath.startsWith(modelsDir) ? 'model' : 'resource';
         logFileChange(fileType, basename(filePath));
 
-        // Regenerate resource types
-        generateResources({ resourcesDir, enumsDir, modelsDir, outputDir, packageName, cwd });
+        registerResources({ resourcesDir, modelsDir, cwd, delivery, strict });
+        delivery.writeTypes();
 
-        // Tell Vite the generated type file changed
-        // TypeScript will pick up changes automatically
-        server.watcher.emit('change', generatedDtsPath);
+        const mod = server.moduleGraph.getModuleById(VIRTUAL_PREFIX + RESOURCES_MODULE_ID);
+        if (mod) {
+          server.reloadModule(mod);
+        } else {
+          server.ws.send({ type: 'full-reload' });
+        }
 
         logRegeneration('resources');
       } catch (e) {
         logError('resources', 'Error regenerating resource types', e);
       }
-    }
-  };
-
-  server.watcher.on('change', handleChange);
+    },
+  });
 }
