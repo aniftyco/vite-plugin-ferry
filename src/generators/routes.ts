@@ -174,10 +174,18 @@ export function generateRoutesDts(table: RouteTable): string {
       `  K extends keyof FerryRoutes = keyof FerryRoutes,`,
       `>(`,
       `  name: K,`,
-      `  ...args: keyof FerryRoutes[K] extends never`,
-      `    ? [params?: QueryBag]`,
+      // Require a params argument only when the route has at least one REQUIRED param.
+      // `{} extends FerryRoutes[K]` holds when every param is optional (or there are none),
+      // so `/archive/{year?}` still accepts `route('archive')`.
+      `  ...args: {} extends FerryRoutes[K]`,
+      `    ? [params?: FerryRoutes[K] & QueryBag]`,
       `    : [params: FerryRoutes[K] & QueryBag]`,
-      `): R;`,
+      // Any string-subtype type argument yields a string (the codemod appends `.url` whenever
+      // a type argument is present): `route<string>`, `route<'fixed'>`, or an alias resolving
+      // to string. The default (no type arg) is RouteResult; a non-string type argument fails
+      // the `extends string | RouteResult` constraint. The return widens to `string`, never
+      // the echoed literal — matching what the codemod actually rewrites.
+      `): R extends string ? string : RouteResult;`,
     ].join('\n'),
     [
       `declare namespace route {`,

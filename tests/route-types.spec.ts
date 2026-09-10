@@ -18,6 +18,8 @@ const table: RouteTable = {
     method: 'get',
     params: [{ name: 'user', optional: false }],
   },
+  // A route whose only param is optional — must not force a params argument.
+  archive: { name: 'archive', uri: '/archive/{year?}', method: 'get', params: [{ name: 'year', optional: true }] },
 };
 
 /** Type-check `consumer` against the generated ambient declarations, returning tsc output. */
@@ -62,14 +64,26 @@ describe('generated route types (tsc --noEmit consumer check)', () => {
       // & QueryBag must suppress excess-property errors on object literals (PLAN line ~125):
       route('users.show', { user: 1, tab: 'a' });
 
+      // No type argument -> RouteResult (an object, coerced via toString in string contexts).
       const r = route('users.show', { user: 1 });
+      const rr: RouteResult = route('users.index');
       const m: HttpMethod = r.method;
       const u: string = r.url;
-      const str: string = route<string>('users.show', { user: 1 });
 
-      route.isCurrent('users.show');
+      // Any string-subtype type argument -> a real string return.
+      const str: string = route<string>('users.show', { user: 1 });
+      const fixed: string = route<'fixed'>('users.show', { user: 1 });
+      type Alias = string;
+      const aliased: string = route<Alias>('users.show', { user: 1 });
+
+      const active: boolean = route.isCurrent('users.show');
       route.isCurrent('users.*');
       route.isCurrent('admin.users.*');
+
+      // an all-optional-param route accepts no params argument...
+      route('archive');
+      // ...and still accepts the optional param when given.
+      route('archive', { year: 2020 });
 
       // @ts-expect-error missing required param
       route('users.show');
@@ -77,6 +91,8 @@ describe('generated route types (tsc --noEmit consumer check)', () => {
       route('nope.name');
       // @ts-expect-error bogus wildcard prefix
       route.isCurrent('bogus.*');
+      // @ts-expect-error a non-string type argument fails the extends-string constraint
+      route<number>('users.show', { user: 1 });
     `;
 
     const { ok, output } = typecheck(consumer);

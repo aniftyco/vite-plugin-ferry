@@ -49,14 +49,15 @@ describe('shouldTransformPre', () => {
 });
 
 describe('shouldTransformPost', () => {
-  it('accepts svelte modules, the vue main module, and the vue script sub-request', () => {
+  it('accepts svelte modules, the vue main module, and the vue script + template sub-requests', () => {
     expect(shouldTransformPost('/a/Foo.svelte')).toBe(true);
     expect(shouldTransformPost('/a/Foo.vue')).toBe(true);
     expect(shouldTransformPost('/a/Foo.vue?vue&type=script&setup=true&lang.ts')).toBe(true);
+    // The template sub-request compiles route() bindings to _ctx.route(), which the post pass rewrites.
+    expect(shouldTransformPost('/a/Foo.vue?vue&type=template&lang.js')).toBe(true);
   });
 
-  it('ignores vue template and style sub-requests', () => {
-    expect(shouldTransformPost('/a/Foo.vue?vue&type=template&lang.js')).toBe(false);
+  it('ignores vue style sub-requests (pure CSS)', () => {
     expect(shouldTransformPost('/a/Foo.vue?vue&type=style&index=0&lang.css')).toBe(false);
   });
 
@@ -130,6 +131,28 @@ describe('transformRoutes', () => {
   it('appends .url for a route<string> call', () => {
     const out = run(`const u = route<string>('users.show', { user: 1 });`);
     expect(out?.code).toContain(`route<string>('/users/{user}', { user: 1 }, 'get').url`);
+  });
+
+  it('appends .url for a route call with a string-literal type argument', () => {
+    const out = run(`const u = route<'fixed'>('users.show', { user: 1 });`);
+    expect(out?.code).toContain(`route<'fixed'>('/users/{user}', { user: 1 }, 'get').url`);
+  });
+
+  it('appends .url for a route call with an aliased string type argument', () => {
+    const out = run(`type Alias = string;\nconst u = route<Alias>('users.show', { user: 1 });`);
+    expect(out?.code).toContain(`route<Alias>('/users/{user}', { user: 1 }, 'get').url`);
+  });
+
+  it('does not append .url for a plain route call with no type argument', () => {
+    const out = run(`const u = route('users.show', { user: 1 });`);
+    expect(out?.code).toContain(`route('/users/{user}', { user: 1 }, 'get')`);
+    expect(out?.code).not.toContain(`.url`);
+  });
+
+  it('never appends .url for a route.isCurrent call carrying a type argument', () => {
+    const out = run(`const active = route.isCurrent<'users.show'>('users.show');`);
+    expect(out?.code).toContain(`route.isCurrent<'users.show'>('/users/{user}')`);
+    expect(out?.code).not.toContain(`.url`);
   });
 
   it('throws a build error for a non-literal route name', () => {
@@ -227,66 +250,16 @@ describe('no-leak guarantee (only referenced patterns ship)', () => {
   });
 });
 
-describe('transformRoutesPost (compiled Vue/Svelte modules)', () => {
-  // Representative svelte.compile() output: a plain JS module (TS already stripped) with a
-  // bare route() call surviving from the component's <script>.
-  const compiledSvelte = [
-    `import * as $ from 'svelte/internal/client';`,
-    `function Comp($$anchor) {`,
-    `  const href = route('users.show', { user: 7 });`,
-    `  const active = route.isCurrent('users.*');`,
-    `  return href;`,
-    `}`,
-    `export default Comp;`,
-  ].join('\n');
-
-  // Representative plugin-vue compileScript() build sub-request output: plain JS.
-  const compiledVueScript = [
-    `import { defineComponent as _defineComponent } from 'vue';`,
-    `export default _defineComponent({`,
-    `  setup(__props) {`,
-    `    const url = route('users.show', { user: 7 });`,
-    `    return () => {};`,
-    `  },`,
-    `});`,
-  ].join('\n');
-
-  it('rewrites a bare route() call in a compiled svelte module and injects the import once', () => {
-    const out = transformRoutesPost(compiledSvelte, '/a/Comp.svelte', table);
-    expect(out?.code).toContain(`route('/users/{user}', { user: 7 }, 'get')`);
-    const occurrences = out?.code.match(/@ferry\/route/g) ?? [];
-    expect(occurrences).toHaveLength(1);
-    expect(out?.code.startsWith(`import { route } from '@ferry/route';`)).toBe(true);
-  });
-
-  it('expands an isCurrent wildcard in a compiled svelte module', () => {
-    const out = transformRoutesPost(compiledSvelte, '/a/Comp.svelte', table);
-    expect(out?.code).toContain(`route.isCurrent(['/users/{user}', '/users'])`);
-  });
-
-  it('does NOT append .url in the post pass (no <string> type argument survives)', () => {
-    const out = transformRoutesPost(compiledSvelte, '/a/Comp.svelte', table);
-    expect(out?.code).not.toContain('.url');
-  });
-
-  it('rewrites a bare route() call in a compiled vue script sub-request', () => {
-    const id = '/a/Comp.vue?vue&type=script&setup=true&lang.ts';
-    const out = transformRoutesPost(compiledVueScript, id, table);
-    expect(out?.code).toContain(`route('/users/{user}', { user: 7 }, 'get')`);
-    expect(out?.code.startsWith(`import { route } from '@ferry/route';`)).toBe(true);
-  });
-
-  it('ignores a Vue template sub-request (bindings compile to _ctx.route)', () => {
-    const template = `const _hoisted = _ctx.route('users.show', { user: 7 });`;
-    const id = '/a/Comp.vue?vue&type=template&lang.js';
-    expect(transformRoutesPost(template, id, table)).toBeNull();
-  });
+describe('transformRoutesPost (mechanics)', () => {
+  // The real @vue/compiler-sfc and svelte/compiler output is exercised end-to-end in
+  // framework-compilers.spec.ts. These cover the id-gate and error mechanics that are
+  // independent of any specific compiler's output shape.
 
   it('does not run over a plain .tsx module in the post pass', () => {
     expect(transformRoutesPost(`route('users.index');`, '/a/App.tsx', table)).toBeNull();
   });
 
-  it('still errors on a non-literal route name in compiled output', () => {
+  it('errors on a non-literal route name in compiled output', () => {
     const compiled = `function C(){ return route(dynamicName); }`;
     expect(() => transformRoutesPost(compiled, '/a/Comp.svelte', table)).toThrow(RouteCodemodError);
   });

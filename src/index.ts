@@ -18,12 +18,6 @@ export type ResourceTypesPluginOptions = {
    * → `any` (never breaks a typecheck); `true` → `unknown` (forces the consumer to narrow).
    */
   strict?: boolean;
-  /**
-   * Inertia page-component root(s), relative to `cwd`, used to resolve a page key from a
-   * file path for `usePage()` generic injection. Defaults to the common Inertia layouts
-   * `resources/js/Pages` and `resources/js/pages`.
-   */
-  pagesDir?: string | string[];
 };
 
 /**
@@ -51,10 +45,6 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
   const routesDir = join(cwd, 'routes');
   const controllersDir = join(cwd, 'app/Http/Controllers');
   const middlewareDir = join(cwd, 'app/Http/Middleware');
-
-  // Inertia page-component roots for usePage() generic injection.
-  const pagesDirOption = options.pagesDir ?? ['resources/js/Pages', 'resources/js/pages'];
-  const pagesRoots = (Array.isArray(pagesDirOption) ? pagesDirOption : [pagesDirOption]).map((dir) => join(cwd, dir));
 
   // Delivery layer: virtual modules (runtime) + ambient .d.ts (types).
   const delivery = createDelivery(cwd);
@@ -101,7 +91,7 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
     // Rewrite literal route() / route.isCurrent() calls: name -> URI pattern, inject
     // the resolver import, and keep the full route table out of the browser bundle.
     transform(code, id) {
-      return transformRoutes(code, id, routeTable, { roots: pagesRoots });
+      return transformRoutes(code, id, routeTable);
     },
 
     // Generate once per startup, during config resolution, so the ambient d.ts and

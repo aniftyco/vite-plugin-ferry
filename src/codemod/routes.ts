@@ -1,6 +1,5 @@
 import MagicString from 'magic-string';
 import { parseSync } from 'oxc-parser';
-import { pageKeyToTypeName } from '../generators/pages.js';
 import type { RouteTable } from '../generators/routes.js';
 import { ROUTE_MODULE_ID } from '../generators/routes.js';
 import { logWarn } from '../utils/banner.js';
@@ -17,8 +16,8 @@ const VUE_ID = /\.vue(?:$|\?)/;
 /** A Vue `?vue&...` sub-request query (any type). */
 const VUE_QUERY = /[?&]vue&/;
 
-/** Vue template/style sub-requests — the post pass ignores these (bindings are `_ctx.route`). */
-const VUE_TEMPLATE_OR_STYLE = /[?&]vue&type=(?:template|style)/;
+/** A Vue `?vue&type=style` sub-request — pure CSS, so the post pass skips it. */
+const VUE_STYLE = /[?&]vue&type=style/;
 
 /** The Vue script sub-request (build emits the script here, already-stripped JS). */
 const VUE_SCRIPT_SUBREQUEST = /[?&]vue&type=script\b/;
@@ -48,15 +47,17 @@ export function shouldTransformPre(id: string): boolean {
 
 /**
  * POST pass ownership: framework-compiled modules, after plugin-vue/plugin-svelte compile
- * and esbuild strips TS. Svelte compiled module, the Vue script sub-request (build), and
- * the Vue main module (dev inlines the script) — never Vue template/style sub-requests.
+ * and esbuild strips TS. The Svelte compiled module (bare `route(...)`), the Vue script
+ * sub-request (build), the Vue template sub-request (build — compiled to `_ctx.route(...)`),
+ * and the Vue main module (dev inlines template + script). Only Vue style sub-requests,
+ * which are pure CSS, are skipped.
  */
 export function shouldTransformPost(id: string): boolean {
   const clean = id.split('?')[0];
   if (clean.includes('/node_modules/')) return false;
   if (SVELTE_ID.test(id)) return true;
   if (VUE_SCRIPT_SUBREQUEST.test(id)) return true;
-  if (VUE_ID.test(clean) && !VUE_TEMPLATE_OR_STYLE.test(id)) return true;
+  if (VUE_ID.test(clean) && !VUE_STYLE.test(id)) return true;
   return false;
 }
 
@@ -114,55 +115,57 @@ function isStringLiteral(node: Node): node is { value: string; start: number; en
   return node && node.type === 'Literal' && typeof node.value === 'string';
 }
 
-/** A `route(...)` call: callee is the bare `route` identifier. */
-function isRouteCall(node: Node): boolean {
-  return node.type === 'CallExpression' && node.callee?.type === 'Identifier' && node.callee.name === 'route';
-}
-
-/** A `route.isCurrent(...)` call. */
-function isIsCurrentCall(node: Node): boolean {
+/** A non-computed `Identifier`-named property access, e.g. `.route` in `_ctx.route`. */
+function isNamedMember(node: Node, name: string): boolean {
   return (
-    node.type === 'CallExpression' &&
-    node.callee?.type === 'MemberExpression' &&
-    node.callee.object?.type === 'Identifier' &&
-    node.callee.object.name === 'route' &&
-    node.callee.property?.type === 'Identifier' &&
-    node.callee.property.name === 'isCurrent'
+    node?.type === 'MemberExpression' &&
+    !node.computed &&
+    node.property?.type === 'Identifier' &&
+    node.property.name === name
   );
 }
 
-/** Whether the call carries an explicit `<string>` type argument (`route<string>(...)`). */
-function hasStringTypeArg(node: Node): boolean {
-  const params = node.typeArguments?.params;
-  return Array.isArray(params) && params[0]?.type === 'TSStringKeyword';
-}
-
-/** A bare `usePage(...)` call: callee is the `usePage` identifier (Inertia's page hook). */
-function isUsePageCall(node: Node): boolean {
-  return node.type === 'CallExpression' && node.callee?.type === 'Identifier' && node.callee.name === 'usePage';
-}
-
-/** Whether a call already carries any explicit type argument. */
-function hasTypeArgument(node: Node): boolean {
-  const params = node.typeArguments?.params;
-  return Array.isArray(params) && params.length > 0;
+/**
+ * A `route(...)` resolver call. Matches the bare `route(...)` identifier AND the Vue
+ * compiled-template form `_ctx.route(...)` (an unqualified `route` in a `<template>` compiles
+ * to a `_ctx` member access). Returns the callee span to normalize to the bare `route`
+ * identifier, plus whether that normalization is needed. Returns null for anything else.
+ */
+function routeCallee(node: Node): { start: number; end: number; normalize: boolean } | null {
+  if (node.type !== 'CallExpression') return null;
+  const callee = node.callee;
+  if (callee?.type === 'Identifier' && callee.name === 'route') {
+    return { start: callee.start, end: callee.end, normalize: false };
+  }
+  // `_ctx.route(...)` — Vue's compiled binding for an unqualified `route`.
+  if (isNamedMember(callee, 'route') && callee.object?.type === 'Identifier' && callee.object.name === '_ctx') {
+    return { start: callee.start, end: callee.end, normalize: true };
+  }
+  return null;
 }
 
 /**
- * The props type name for a page-component file, or null when the file is not under a
- * configured `Pages/` root (a shared child component types `usePage` manually). The page
- * key is the path under the root, minus extension: `.../Pages/Users/Show.tsx` → `Users/Show`.
+ * A `route.isCurrent(...)` call. Matches the bare `route.isCurrent(...)` AND the Vue
+ * compiled-template form `_ctx.route.isCurrent(...)`. Returns the span of the `route`
+ * receiver to normalize to the bare `route` identifier, plus whether that is needed.
  */
-export function pageTypeNameForId(id: string, roots: string[]): string | null {
-  const clean = id.split('?')[0];
-  for (const root of roots) {
-    const prefix = root.endsWith('/') ? root : root + '/';
-    if (!clean.startsWith(prefix)) continue;
-    const rel = clean.slice(prefix.length).replace(/\.(?:m|c)?[jt]sx?$/, '');
-    if (!rel) continue;
-    return pageKeyToTypeName(rel);
+function isCurrentCallee(node: Node): { start: number; end: number; normalize: boolean } | null {
+  if (node.type !== 'CallExpression' || !isNamedMember(node.callee, 'isCurrent')) return null;
+  const obj = node.callee.object;
+  if (obj?.type === 'Identifier' && obj.name === 'route') {
+    return { start: obj.start, end: obj.end, normalize: false };
+  }
+  // `_ctx.route.isCurrent(...)` — Vue's compiled binding.
+  if (isNamedMember(obj, 'route') && obj.object?.type === 'Identifier' && obj.object.name === '_ctx') {
+    return { start: obj.start, end: obj.end, normalize: true };
   }
   return null;
+}
+
+/** Whether the call carries ANY explicit type argument (`route<...>(...)`). */
+function hasTypeArg(node: Node): boolean {
+  const params = node.typeArguments?.params;
+  return Array.isArray(params) && params.length > 0;
 }
 
 /** Route names matched by a wildcard: `users.*` → names under `users.`; `*` → all. */
@@ -175,20 +178,16 @@ function matchWildcard(table: RouteTable, prefix: string): string[] {
 /**
  * The core rewrite, shared by the pre and post passes: rewrites literal `route('name', ...)`
  * and `route.isCurrent(...)` calls so the URI PATTERN (and, for `route()`, the HTTP method)
- * arrive inline, appends `.url` for `route<string>(...)` when the type argument survives (pre
- * pass only — types are stripped by the post pass), and injects the resolver import. The full
- * route table never ships — only referenced routes' patterns end up in the output. Returns
- * `null` when nothing changed. Assumes the id gate + cheap bail already ran.
+ * arrive inline, appends `.url` for any `route<...>(...)` call whose type argument survives (pre
+ * pass only — types are stripped by the post pass), and injects the resolver import. Vue's
+ * compiled `_ctx.route(...)` / `_ctx.route.isCurrent(...)` bindings are normalized to the
+ * imported `route` so they resolve through ferry too. The full route table never ships — only
+ * referenced routes' patterns end up in the output. Returns `null` when nothing changed.
+ * Assumes the id gate + cheap bail already ran.
  *
  * @throws RouteCodemodError on a non-literal route name (protects the no-leak guarantee).
  */
-function rewrite(
-  code: string,
-  id: string,
-  table: RouteTable,
-  lang: OxcLang,
-  pageTypeName: string | null
-): { code: string; map: any } | null {
+function rewrite(code: string, id: string, table: RouteTable, lang: OxcLang): { code: string; map: any } | null {
   let parsed;
   try {
     parsed = parseSync(id.split('?')[0], code, { sourceType: 'module', lang });
@@ -206,7 +205,8 @@ function rewrite(
   };
 
   walk(parsed.program, (node) => {
-    if (isRouteCall(node)) {
+    const routeCall = routeCallee(node);
+    if (routeCall) {
       const args = node.arguments ?? [];
       const nameArg = args[0];
       if (!nameArg) return;
@@ -224,6 +224,11 @@ function rewrite(
         return;
       }
 
+      // `_ctx.route` -> the imported `route`, so the injected resolver is the one called.
+      if (routeCall.normalize) {
+        s.update(routeCall.start, routeCall.end, 'route');
+      }
+
       // name literal -> URI pattern, in place
       s.update(nameArg.start, nameArg.end, `'${entry.uri}'`);
 
@@ -234,8 +239,8 @@ function rewrite(
         s.appendLeft(args[args.length - 1].end, `, '${entry.method}'`);
       }
 
-      // route<string>(...) -> a real string at runtime
-      if (hasStringTypeArg(node)) {
+      // route<...>(...) with any type argument -> a real string at runtime
+      if (hasTypeArg(node)) {
         s.appendRight(node.end, '.url');
       }
 
@@ -244,7 +249,8 @@ function rewrite(
       return;
     }
 
-    if (isIsCurrentCall(node)) {
+    const isCurrent = isCurrentCallee(node);
+    if (isCurrent) {
       const args = node.arguments ?? [];
       const arg = args[0];
       if (!arg) return;
@@ -254,6 +260,11 @@ function rewrite(
           node,
           'route.isCurrent() requires a literal pattern; a non-literal pattern cannot be resolved at build time'
         );
+      }
+
+      // `_ctx.route.isCurrent` -> `route.isCurrent`, so the injected resolver is used.
+      if (isCurrent.normalize) {
+        s.update(isCurrent.start, isCurrent.end, 'route');
       }
 
       const value = arg.value;
@@ -301,15 +312,6 @@ function rewrite(
       usedRoute = true;
       return;
     }
-
-    // usePage() generic injection — PRE pass over a page-component file only. A bare
-    // `usePage()` gets the page's props type argument; an already-typed call is left
-    // alone. Only survives in real TS source, so it is inherently React/TS-only (the post
-    // pass passes no page type and never reaches this).
-    if (pageTypeName && isUsePageCall(node) && !hasTypeArgument(node)) {
-      s.appendLeft(node.callee.end, `<${pageTypeName}>`);
-      changed = true;
-    }
   });
 
   // Inject the resolver import once per module that references the global `route`.
@@ -326,38 +328,25 @@ function rewrite(
   };
 }
 
-/** Configurable `Pages/` roots (absolute) the usePage injection resolves page keys against. */
-export type PageCodemodOptions = {
-  roots: string[];
-};
-
 /**
  * PRE pass (`enforce: 'pre'`): rewrites real source modules — React/JSX and plain TS/JS.
- * TS types are intact here, so `route<string>(...)` gets the `.url` sugar and a page
- * component's bare `usePage()` gets its props-type generic injected.
+ * TS types are intact here, so `route<...>(...)` gets the `.url` sugar.
  */
-export function transformRoutes(
-  code: string,
-  id: string,
-  table: RouteTable,
-  pageOptions?: PageCodemodOptions
-): { code: string; map: any } | null {
+export function transformRoutes(code: string, id: string, table: RouteTable): { code: string; map: any } | null {
   if (!shouldTransformPre(id)) return null;
-  // Cheap bail: nothing to do if the source never mentions `route` or `usePage`.
-  if (!code.includes('route') && !code.includes('usePage')) return null;
-  const pageTypeName = pageOptions ? pageTypeNameForId(id, pageOptions.roots) : null;
-  return rewrite(code, id, table, deriveLang(id), pageTypeName);
+  // Cheap bail: nothing to do if the source never mentions `route`.
+  if (!code.includes('route')) return null;
+  return rewrite(code, id, table, deriveLang(id));
 }
 
 /**
  * POST pass (`enforce: 'post'`): rewrites framework-compiled Vue/Svelte modules, after
  * their plugins compile the component and esbuild strips TS. Same rewriting as the pre
- * pass MINUS the `route<string>` → `.url` sugar — there is no `<string>` type argument
- * left to detect at this stage, so that sugar is inherently React/TS-only.
+ * pass MINUS the `route<...>` → `.url` sugar — there is no type argument left to detect
+ * at this stage, so that sugar is inherently React/TS-only.
  */
 export function transformRoutesPost(code: string, id: string, table: RouteTable): { code: string; map: any } | null {
   if (!shouldTransformPost(id)) return null;
   if (!code.includes('route')) return null;
-  // No page type is passed, so the post pass never injects a usePage generic.
-  return rewrite(code, id, table, deriveLang(id), null);
+  return rewrite(code, id, table, deriveLang(id));
 }
