@@ -1,18 +1,26 @@
 # vite-plugin-ferry
 
-> A Vite plugin that ferries your Laravel backend types to the frontend as fully-typed TypeScript.
+> Type-safe Inertia apps end to end — generates TypeScript for routes, enums, resources, and page props straight from your Laravel backend.
 
-## What it does
+[![npm version](https://img.shields.io/npm/v/vite-plugin-ferry.svg?style=flat-square)](https://www.npmjs.com/package/vite-plugin-ferry)
+[![npm downloads](https://img.shields.io/npm/dt/vite-plugin-ferry.svg?style=flat-square)](https://www.npmjs.com/package/vite-plugin-ferry)
+[![License](https://img.shields.io/npm/l/vite-plugin-ferry.svg?style=flat-square)](LICENSE)
 
-Ferry watches your Laravel application and automatically generates TypeScript definitions so your frontend always stays
-in sync with your backend.
+## Features
 
-- **Enums** — Generates types and runtime constants from `app/Enums/`
-- **Resources** — Generates response types from `app/Http/Resources/`
+- 🧭 **Routes** — a fully typed `route()` helper resolving named routes to their URL and method client-side, with zero route table shipped to the browser
+- 🏷️ **Enums** — PHP enums become real JS classes with `is`/`from`/`values`/`keys`/`cases`/`options`, narrowed to their literal value union
+- 📦 **Resources** — precise types for your `JsonResource` classes from static shape analysis plus real column/cast metadata, degrading gracefully instead of breaking your build
+- 🧩 **Page props** — the props an Inertia page receives, typed through `usePage<T>()` and Inertia's own `sharedPageProps` augmentation
+- ⚛️ **React, Vue, and Svelte** — works with any Inertia frontend; React/plain TS gets automatic `route<string>`/`usePage<T>` injection, Vue and Svelte use `.url` and imported prop types explicitly
+
+Nothing is written into your project tree. Runtime code is delivered as Vite virtual modules, types as one generated ambient `.d.ts`, and everything regenerates on every run.
 
 ## Requirements
 
-- **TypeScript ^5.0** — Required as a peer dependency for code generation
+- Laravel 13+
+- TypeScript `^5.0` (peer dependency, used for code generation)
+- npm — Ferry writes into the hoisted `node_modules/@types`. Supported on npm's flat `node_modules` layout; pnpm and Yarn PnP aren't supported
 
 ## Installation
 
@@ -31,167 +39,92 @@ export default defineConfig({
 });
 ```
 
-## Usage
+That's it — no tsconfig changes, no generated files to gitignore. Ferry auto-loads its types from `node_modules/@types/vite-plugin-ferry` the moment TypeScript 5.x sees the package installed.
 
-Import your backend types directly in your frontend code:
+If your `tsconfig.json` sets `compilerOptions.types` (which suppresses TypeScript's automatic `@types/*` inclusion), add the bare package name to the array so ferry's ambient types still load:
 
-```ts
-import { OrderStatus } from '@ferry/enums';
-import type { UserResource } from '@ferry/resources';
+```json
+{
+  "compilerOptions": {
+    "types": ["node", "vite-plugin-ferry"]
+  }
+}
 ```
 
-## Examples
+## Usage
 
-### Enums
+### Routes — `@ferry/route`
 
-#### String-backed enum with labels
+`route()` is ambient-typed — no import needed in your source. Ferry's codemod rewrites the call at build time, swapping the route name for its URI pattern and injecting the resolver import for you.
 
-When your enum has a `label()` method, Ferry generates a typed constant object:
+```php
+// routes/web.php
+Route::get('/users/{user}', [UserController::class, 'show'])->name('users.show');
+```
+
+```tsx
+const href = route('users.show', { user: 1 });
+// build-time codemod rewrites the call to:
+route('/users/{user}', { user: 1 }, 'get')
+// runtime resolves to: { url: '/users/1', method: 'get' }
+
+<Link href={route('users.show', { user: 1 })} />       // Link reads { url, method } directly
+route('users.destroy', { user: 1 })                      // { url, method } for router.delete / form.submit
+`Visit ${route('users.show', { user: 1 })}`              // template literal: coerces via toString() to '/users/1'
+route<string>('users.show', { user: 1 })                // explicit string: '/users/1'
+route('users.index', { page: 2 })                        // extra keys become the query string: '/users?page=2'
+```
+
+Current-route checks work the same way, with route-name prefixes validated at compile time:
+
+```tsx
+route.isCurrent('users.show', { user: 1 });  // this route, this user
+route.isCurrent('users.*');                  // any users.* route active (nav highlighting)
+```
+
+Only the patterns for routes actually referenced in your code ever reach the browser — the full route table never ships.
+
+### Enums — `@ferry/enum`, `@ferry/enums`
 
 ```php
 // app/Enums/OrderStatus.php
 enum OrderStatus: string
 {
-    case Pending = 'pending';
-    case Shipped = 'shipped';
-    case Delivered = 'delivered';
+    case PENDING = 'pending';
+    case APPROVED = 'approved';
+    case REJECTED = 'rejected';
 
     public function label(): string
     {
         return match ($this) {
-            self::Pending => 'Pending Order',
-            self::Shipped => 'Shipped',
-            self::Delivered => 'Delivered',
+            self::PENDING => 'Pending Order',
+            self::APPROVED => 'Approved',
+            self::REJECTED => 'Rejected',
         };
     }
 }
 ```
 
-Generates:
-
 ```ts
-// @ferry/enums
-export declare const OrderStatus: {
-  Pending: { value: 'pending'; label: 'Pending Order' };
-  Shipped: { value: 'shipped'; label: 'Shipped' };
-  Delivered: { value: 'delivered'; label: 'Delivered' };
-};
-```
+import { OrderStatus } from '@ferry/enums';
 
-#### String-backed enum without labels
-
-Simple string enums become TypeScript enums:
-
-```php
-// app/Enums/Role.php
-enum Role: string
-{
-    case ADMIN = 'admin';
-    case USER = 'user';
-    case GUEST = 'guest';
+export class OrderStatus extends Enum {
+  static PENDING = new OrderStatus('PENDING', 'pending', 'Pending Order');
+  static APPROVED = new OrderStatus('APPROVED', 'approved', 'Approved');
+  static REJECTED = new OrderStatus('REJECTED', 'rejected', 'Rejected');
 }
+
+OrderStatus.PENDING.value;     // 'pending'
+OrderStatus.PENDING.label;     // 'Pending Order' (undefined when the PHP enum has no label())
+OrderStatus.from('approved');  // OrderStatus.APPROVED
+OrderStatus.PENDING.is(order.status); // instance equality by value
+OrderStatus.values();          // ['pending', 'approved', 'rejected']
+OrderStatus.options();         // [{ value: 'pending', label: 'Pending Order' }, ...]
 ```
 
-Generates:
+Each case is a real instance of a generated class extending the base `Enum` from `@ferry/enum` — a class is both a value and a type, so `status: OrderStatus` just works. Int-backed enums keep their numeric `value`; unbacked enums use the case name as the value.
 
-```ts
-// @ferry/enums
-export enum Role {
-  ADMIN = 'admin',
-  USER = 'user',
-  GUEST = 'guest',
-}
-```
-
-#### Int-backed enum
-
-Integer enums work the same way:
-
-```php
-// app/Enums/Priority.php
-enum Priority: int
-{
-    case LOW = 1;
-    case MEDIUM = 2;
-    case HIGH = 3;
-    case URGENT = 4;
-}
-```
-
-Generates:
-
-```ts
-// @ferry/enums
-export enum Priority {
-  LOW = 1,
-  MEDIUM = 2,
-  HIGH = 3,
-  URGENT = 4,
-}
-```
-
-#### Unit enum (no backing type)
-
-Unit enums use their case names as values:
-
-```php
-// app/Enums/Color.php
-enum Color
-{
-    case RED;
-    case GREEN;
-    case BLUE;
-}
-```
-
-Generates:
-
-```ts
-// @ferry/enums
-export enum Color {
-  RED = 'RED',
-  GREEN = 'GREEN',
-  BLUE = 'BLUE',
-}
-```
-
-### Resources
-
-#### Basic resource
-
-```php
-// app/Http/Resources/UserResource.php
-class UserResource extends JsonResource
-{
-    public function toArray(Request $request): array
-    {
-        return [
-            'id' => $this->resource->id,
-            'name' => $this->resource->name,
-            'email' => $this->resource->email,
-            'is_admin' => $this->resource->is_admin,
-            'created_at' => $this->resource->created_at,
-        ];
-    }
-}
-```
-
-Generates:
-
-```ts
-// @ferry/resources
-export type UserResource = {
-  id: string;
-  name: string;
-  email: string;
-  is_admin: boolean;
-  created_at: string;
-};
-```
-
-#### Resource with relations
-
-Fields using `whenLoaded()` become optional and resolve to the correct resource type:
+### Resources — `@ferry/resources`
 
 ```php
 // app/Http/Resources/PostResource.php
@@ -200,85 +133,109 @@ class PostResource extends JsonResource
     public function toArray(Request $request): array
     {
         return [
-            'id' => $this->resource->id,
-            'title' => $this->resource->title,
-            'slug' => $this->resource->slug,
-            'is_published' => $this->resource->is_published,
+            'id' => $this->id,
+            'title' => $this->title,
             'author' => UserResource::make($this->whenLoaded('author')),
             'comments' => CommentResource::collection($this->whenLoaded('comments')),
-            'created_at' => $this->resource->created_at,
         ];
     }
 }
 ```
 
-Generates:
-
 ```ts
-// @ferry/resources
-export type PostResource = {
-  id: string;
-  title: string;
-  slug: string;
-  is_published: boolean;
-  author?: UserResource[];
-  comments?: CommentResource[];
-  created_at: string;
-};
+declare module '@ferry/resources' {
+  export type PostResource = {
+    id: number;
+    title: string;
+    author?: UserResource;
+    comments?: CommentResource[];
+  };
+}
 ```
 
-#### Resource with nested objects
+```ts
+import type { PostResource } from '@ferry/resources';
+```
 
-Inline array structures become typed objects:
+Key set and optionality come from static analysis of `toArray()` — `when()`/`whenLoaded()` fields become optional, `Resource::make()` resolves to a single nested type, `Resource::collection()` to an array. Leaf types (nullability, casts, enum casts) come from a Laravel schema/casts dump, so a nullable enum-cast column types as `OrderStatus | null` and an `integer` cast types as `number`.
+
+A field ferry can't resolve statically degrades instead of breaking your build — controlled by the [`strict`](#configuration) option — and reports a warning naming the resource and field. Pin any field precisely with a `@ferry` docblock tag on `toArray()`:
 
 ```php
-// app/Http/Resources/OrderResource.php
-class OrderResource extends JsonResource
+/**
+ * @ferry meta Record<string, string>
+ */
+public function toArray(Request $request): array
 {
-    public function toArray(Request $request): array
-    {
-        return [
-            'id' => $this->resource->id,
-            'total' => $this->resource->total,
-            'status' => $this->resource->status,
-            'items' => $this->resource->items,
-            'user' => $this->whenLoaded('user'),
-            'shipping_address' => [
-                'street' => $this->resource->address_street,
-                'city' => $this->resource->address_city,
-                'zip' => $this->resource->address_zip,
-            ],
-            'created_at' => $this->resource->created_at,
-        ];
-    }
+    return [
+        'meta' => $this->buildMeta(), // ferry can't resolve this -> warns -> annotate it
+    ];
 }
 ```
 
-Generates:
+### Page props — `@ferry/pages`
+
+Ferry reads every `Inertia::render('Users/Show', [...])` across your controllers and infers each prop's type using the same resource/enum machinery, then generates a props type per page served from `@ferry/pages`.
+
+```php
+// app/Http/Controllers/UserController.php
+public function show(User $user)
+{
+    return Inertia::render('Users/Show', [
+        'user' => new UserResource($user),
+        'status' => $user->status,
+    ]);
+}
+```
+
+In a React/plain-TS page component under your Pages root, the codemod injects the generic into a bare `usePage()` call automatically:
+
+```tsx
+// resources/js/Pages/Users/Show.tsx
+const page = usePage(); // codemod injects -> usePage<UsersShowProps>()
+page.props.user;        // UserResource
+page.props.status;      // OrderStatus
+```
+
+In a shared component, or in Vue/Svelte (where the generic can't be injected post-compile), import the type explicitly:
 
 ```ts
-// @ferry/resources
-export type OrderResource = {
-  id: string;
-  total: string;
-  status: string;
-  items: string;
-  user?: UserResource;
-  shipping_address: { street: string; city: string; zip: string };
-  created_at: string;
-};
+import type { UsersShowProps } from '@ferry/pages';
+
+const page = usePage<UsersShowProps>();
 ```
 
-## Publishing
+Shared data from `HandleInertiaRequests::share()` fills Inertia's own `InertiaConfig.sharedPageProps` augmentation and `errorValueType`, so `page.props.auth` and validation errors are typed everywhere without any per-page wiring.
 
-To publish a new version:
+## Configuration
+
+```ts
+ferry({
+  cwd: process.cwd(),
+  strict: false,
+  pagesDir: ['resources/js/Pages', 'resources/js/pages'],
+})
+```
+
+| Option     | Type                   | Default                                              | Description                                                                                                    |
+| ---------- | ---------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `cwd`      | `string`               | `process.cwd()`                                       | Root of the Laravel app ferry reads from (`app/Enums`, `app/Http/Resources`, `routes`, etc.)                     |
+| `strict`   | `boolean`              | `false`                                               | Fallback type for a field ferry can't resolve statically. `false` → `any` (never breaks a typecheck); `true` → `unknown` (forces the consumer to narrow) |
+| `pagesDir` | `string \| string[]`   | `['resources/js/Pages', 'resources/js/pages']`        | Inertia page-component root(s), relative to `cwd`, used to resolve a page's props type for `usePage()` injection |
+
+## Testing
 
 ```bash
-npm version patch  # or minor, major
-git push --follow-tags
+npm test
 ```
 
-This bumps the version, creates a commit and tag, then pushes both to trigger the publish workflow.
+## Contributing
+
+Issues and pull requests are welcome.
+
+## Security
+
+If you discover a security vulnerability, please email josh@joshmanders.com instead of opening a public issue.
 
 ## License
 
