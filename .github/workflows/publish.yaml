@@ -1,8 +1,8 @@
 name: Publish Ferry
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
 permissions:
   id-token: write
   contents: read
@@ -17,6 +17,12 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
       - run: npm ci
+      # package.json stays 0.0.0 in the repo; this only sets the version in the
+      # throwaway CI checkout, from the release tag (leading "v" stripped).
+      - name: Set version from release
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: npm version "${TAG#v}" --no-git-tag-version --allow-same-version
       - run: npm test
       - run: npm run build
       - run: npm publish --provenance --access public
