@@ -1,9 +1,9 @@
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   RESOURCE_RUNTIME,
   parseMetadataDump,
@@ -89,7 +89,10 @@ describe('resolveCast', () => {
 
   it('maps primitive casts without reporting an enum', () => {
     expect(resolveCast('integer')).toEqual({ type: 'number' });
-    expect(resolveCast('decimal:2')).toEqual({ type: 'number' });
+    // `decimal:<scale>` serializes to a formatted string, not a number.
+    expect(resolveCast('decimal:2')).toEqual({ type: 'string' });
+    expect(resolveCast('float')).toEqual({ type: 'number' });
+    expect(resolveCast('double')).toEqual({ type: 'number' });
     expect(resolveCast('boolean')).toEqual({ type: 'boolean' });
     expect(resolveCast('datetime')).toEqual({ type: 'string' });
     expect(resolveCast('array')).toEqual({ type: 'any[]' });
@@ -337,6 +340,31 @@ describe('generateResourcesDtsBlock', () => {
     const block = generateResourcesDtsBlock(resources, new Set(['OrderStatus']));
     expect(block).not.toContain('import');
   });
+
+  it('quotes a non-identifier field key so the declaration is valid TS', () => {
+    const resources: Record<string, ResourceEntry> = {
+      UserResource: {
+        kind: 'shape',
+        fields: {
+          'display-name': { type: 'string', optional: false },
+          id: { type: 'number', optional: false },
+        },
+      },
+    };
+
+    const block = generateResourcesDtsBlock(resources, new Set());
+    expect(block).toContain('"display-name": string;');
+    expect(block).toContain('id: number;');
+
+    // The block compiles as real TS (a bare `display-name:` key would be a syntax error).
+    const ambient = assembleAmbientTypes({ blocks: [ENUM_BASE_DTS, block] });
+    const consumer = dedent`
+      import type { UserResource } from '@ferry/resources';
+      const u = { 'display-name': 'x', id: 1 } satisfies UserResource;
+    `;
+    const { ok, output } = typecheck(ambient, consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
 });
 
 describe('static analysis of the resource fixtures', () => {
@@ -372,6 +400,60 @@ describe('static analysis of the resource fixtures', () => {
 
   it('never emits the old @app/enums namespace', () => {
     expect(block).not.toContain('@app/enums');
+  });
+});
+
+describe('collectResourceInputs (recursion + duplicate short names)', () => {
+  const minimalResource = (className: string) =>
+    `<?php\nnamespace App;\nuse Illuminate\\Http\\Resources\\Json\\JsonResource;\nclass ${className} extends JsonResource {\n  public function toArray($request): array { return ['id' => $this->id]; }\n}\n`;
+
+  function scratch(): { dir: string; resourcesDir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'ferry-collect-'));
+    const resourcesDir = join(dir, 'Resources');
+    mkdirSync(resourcesDir, { recursive: true });
+    return { dir, resourcesDir };
+  }
+
+  const opts = (dir: string, resourcesDir: string, strict = false) => ({
+    resourcesDir,
+    modelsDir: join(dir, 'Models'),
+    enumsDir: join(dir, 'Enums'),
+    cwd: dir,
+    strict,
+  });
+
+  it('recurses into subdirectories so nested resources are collected', () => {
+    const { dir, resourcesDir } = scratch();
+    writeFileSync(join(resourcesDir, 'UserResource.php'), minimalResource('UserResource'), 'utf8');
+    mkdirSync(join(resourcesDir, 'Admin'), { recursive: true });
+    writeFileSync(join(resourcesDir, 'Admin', 'AuditResource.php'), minimalResource('AuditResource'), 'utf8');
+
+    const names = collectResourceInputs(opts(dir, resourcesDir)).map((i) => i.className);
+    expect(names).toContain('UserResource');
+    expect(names).toContain('AuditResource');
+  });
+
+  it('keeps the first and warns on a duplicate short class name (non-strict)', () => {
+    const { dir, resourcesDir } = scratch();
+    writeFileSync(join(resourcesDir, 'UserResource.php'), minimalResource('UserResource'), 'utf8');
+    mkdirSync(join(resourcesDir, 'Admin'), { recursive: true });
+    writeFileSync(join(resourcesDir, 'Admin', 'UserResource.php'), minimalResource('UserResource'), 'utf8');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const inputs = collectResourceInputs(opts(dir, resourcesDir));
+
+    expect(inputs.filter((i) => i.className === 'UserResource')).toHaveLength(1);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('hard-fails on a duplicate short class name under strict', () => {
+    const { dir, resourcesDir } = scratch();
+    writeFileSync(join(resourcesDir, 'UserResource.php'), minimalResource('UserResource'), 'utf8');
+    mkdirSync(join(resourcesDir, 'Admin'), { recursive: true });
+    writeFileSync(join(resourcesDir, 'Admin', 'UserResource.php'), minimalResource('UserResource'), 'utf8');
+
+    expect(() => collectResourceInputs(opts(dir, resourcesDir, true))).toThrow(/Duplicate resource class name 'UserResource'/);
   });
 });
 

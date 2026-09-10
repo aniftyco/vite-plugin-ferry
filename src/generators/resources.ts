@@ -2,7 +2,7 @@ import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, parse, relative } from 'node:path';
 import type { Delivery } from '../delivery/index.js';
-import { getPhpFiles, readFileSafe } from '../utils/file.js';
+import { getPhpFilesRecursive, readFileSafe } from '../utils/file.js';
 import {
   extractDocblockArrayShape,
   extractFerryAnnotations,
@@ -10,6 +10,7 @@ import {
   type EnumDefinition,
   type ResourceFieldInfo,
 } from '../utils/php-parser.js';
+import { renderKey } from '../utils/ts-keys.js';
 import { mapDocTypeToTs, mapPhpTypeToTs } from '../utils/type-mapper.js';
 import { collectEnums } from './enums.js';
 import { runArtisan } from '../utils/artisan.js';
@@ -195,7 +196,9 @@ export function resolveCast(
     return { type: '', unresolved: true };
   }
 
-  if (['int', 'integer', 'real', 'float', 'double', 'decimal'].includes(low)) return { type: 'number' };
+  // `decimal:<scale>` serializes to a formatted string, not a number.
+  if (low === 'decimal') return { type: 'string' };
+  if (['int', 'integer', 'real', 'float', 'double'].includes(low)) return { type: 'number' };
   if (['bool', 'boolean'].includes(low)) return { type: 'boolean' };
   if (['date', 'datetime', 'immutable_date', 'immutable_datetime', 'timestamp'].includes(low)) {
     return { type: 'string' };
@@ -381,7 +384,7 @@ function renderResourceType(name: string, entry: ResourceEntry): string {
     return `export type ${name} = {};`;
   }
 
-  const lines = fields.map(([key, field]) => `  ${key}${field.optional ? '?' : ''}: ${field.type};`);
+  const lines = fields.map(([key, field]) => `  ${renderKey(key)}${field.optional ? '?' : ''}: ${field.type};`);
   return [`export type ${name} = {`, ...lines, `};`].join('\n');
 }
 
@@ -435,28 +438,49 @@ function mapDocShape(docShape: Record<string, string>): Record<string, string> {
 
 /**
  * Read every resource file and statically analyze its `toArray()`. Pure file I/O plus
- * the `php-parser` static pass — no PHP process. Returns one input per resource.
+ * the `php-parser` static pass — no PHP process. Recurses into subdirectories so nested
+ * resources are collected, matching page generation (which scans controllers recursively);
+ * otherwise a nested resource could be imported by `@ferry/pages` yet never exported here.
+ *
+ * Resources are keyed by their short class name, so two classes with the same short name in
+ * different namespaces collide. Default: first-wins with a warning naming both files. Under
+ * `strict`, the collision hard-fails the build instead.
  */
 export function collectResourceInputs(options: {
   resourcesDir: string;
   modelsDir: string;
   enumsDir: string;
   cwd: string;
+  strict?: boolean;
 }): ResourceInput[] {
-  const { resourcesDir, modelsDir, enumsDir, cwd } = options;
+  const { resourcesDir, modelsDir, enumsDir, cwd, strict = false } = options;
 
   if (!existsSync(resourcesDir)) {
     return [];
   }
 
   const inputs: ResourceInput[] = [];
+  const seen = new Map<string, string>();
 
-  for (const file of getPhpFiles(resourcesDir)) {
+  for (const filePath of getPhpFilesRecursive(resourcesDir)) {
+    const className = parse(filePath).name;
+    const relativePhpPath = relative(cwd, filePath);
+
+    // Duplicate short class name across namespaces — checked before parsing so a strict
+    // failure propagates rather than being swallowed by the per-file parse guard below.
+    const firstPath = seen.get(className);
+    if (firstPath !== undefined) {
+      const message = `Duplicate resource class name '${className}': ${relative(cwd, firstPath)} and ${relativePhpPath}`;
+      if (strict) {
+        throw new Error(`${message}. Rename one, or disable strict mode to keep the first.`);
+      }
+      logWarn('resources', `${message}. Keeping the first; ignoring ${relativePhpPath}.`);
+      continue;
+    }
+    seen.set(className, filePath);
+
     try {
-      const filePath = join(resourcesDir, file);
       const content = readFileSafe(filePath) || '';
-      const className = parse(file).name;
-      const relativePhpPath = relative(cwd, filePath);
 
       const collectedEnums: Record<string, EnumDefinition> = {};
       const docShape = extractDocblockArrayShape(content);
@@ -479,7 +503,7 @@ export function collectResourceInputs(options: {
         enumNames: Object.keys(collectedEnums),
       });
     } catch (e) {
-      logWarn('resources', `Failed to parse resource file: ${file} (${e})`);
+      logWarn('resources', `Failed to parse resource file: ${relativePhpPath} (${e})`);
     }
   }
 
@@ -571,7 +595,7 @@ export function dumpMetadata(cwd: string, models: string[]): MetadataDump {
 export function registerResources({ resourcesDir, modelsDir, cwd, delivery, strict = false }: ResourceRegisterOptions): void {
   const enumsDir = join(cwd, 'app/Enums');
 
-  const inputs = collectResourceInputs({ resourcesDir, modelsDir, enumsDir, cwd });
+  const inputs = collectResourceInputs({ resourcesDir, modelsDir, enumsDir, cwd, strict });
   const models = [...new Set(inputs.map((i) => i.model))].filter(Boolean);
   const metadata = dumpMetadata(cwd, models);
 

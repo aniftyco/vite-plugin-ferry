@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type * as PhpParserTypes from 'php-parser';
 import { readFileSafe } from './file.js';
 import { mapPhpTypeToTs } from './type-mapper.js';
+import { renderKey } from './ts-keys.js';
 
 // Import php-parser (CommonJS module with constructor)
 const require = createRequire(import.meta.url);
@@ -672,7 +673,7 @@ export function inferTypeFromAstNode(
     if (Object.keys(nestedFields).length > 0) {
       const props = Object.entries(nestedFields).map(([k, v]) => {
         const opt = v.fieldInfo.optional ? '?' : '';
-        return `${k}${opt}: ${v.fieldInfo.type}`;
+        return `${renderKey(k)}${opt}: ${v.fieldInfo.type}`;
       });
       return { type: `{ ${props.join('; ')} }`, optional };
     }

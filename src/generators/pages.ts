@@ -1,8 +1,9 @@
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { Delivery } from '../delivery/index.js';
 import { logWarn } from '../utils/banner.js';
 import { getPhpFilesRecursive, readFileSafe } from '../utils/file.js';
+import { renderKey } from '../utils/ts-keys.js';
 import {
   parsePhp,
   findAllNodesByKind,
@@ -147,7 +148,7 @@ export function inferPropType(node: any, key: string, options: InferOptions): Re
     const nested = parseEntries(node.items ?? [], options);
     const keys = Object.keys(nested);
     if (keys.length > 0) {
-      const props = keys.map((k) => `${k}${nested[k].optional ? '?' : ''}: ${nested[k].type}`);
+      const props = keys.map((k) => `${renderKey(k)}${nested[k].optional ? '?' : ''}: ${nested[k].type}`);
       return { type: `{ ${props.join('; ')} }`, optional: false };
     }
     return { type: 'any[]', optional: false };
@@ -351,7 +352,7 @@ function finalizeFields(
 function renderShape(fields: Record<string, PropField>): string {
   const entries = Object.entries(fields);
   if (entries.length === 0) return '{}';
-  const props = entries.map(([key, field]) => `${key}${field.optional ? '?' : ''}: ${field.type}`);
+  const props = entries.map(([key, field]) => `${renderKey(key)}${field.optional ? '?' : ''}: ${field.type}`);
   return `{ ${props.join('; ')} }`;
 }
 
@@ -513,9 +514,7 @@ export function registerPages({
 }: PageRegisterOptions): void {
   const enumsDir = join(cwd, 'app/Enums');
   const knownEnums = new Set(Object.keys(collectEnums(enumsDir, cwd)));
-  const knownResources = new Set(
-    getPhpFilesRecursive(resourcesDir).map((f) => f.replace(/.*\//, '').replace(/\.php$/, ''))
-  );
+  const knownResources = new Set(getPhpFilesRecursive(resourcesDir).map((f) => basename(f, '.php')));
 
   const renderInputs = collectRenderInputs({ controllersDir, resourcesDir, modelsDir, enumsDir, knownEnums });
   const sharedInput = collectSharedInput({ middlewareDir, resourcesDir, modelsDir, enumsDir, knownEnums });
