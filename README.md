@@ -12,7 +12,7 @@
 - 🏷️ **Enums** — PHP enums become real JS classes with `is`/`from`/`values`/`keys`/`cases`/`options`, narrowed to their literal value union
 - 📦 **Resources** — precise types for your `JsonResource` classes from static shape analysis plus real column/cast metadata, degrading gracefully instead of breaking your build
 - 🧩 **Page props** — the props an Inertia page receives, typed through `usePage<T>()` and Inertia's own `sharedPageProps` augmentation
-- ⚛️ **React, Vue, and Svelte** — works with any Inertia frontend; React/plain TS gets automatic `route<string>`/`usePage<T>` injection, Vue and Svelte use `.url` and imported prop types explicitly
+- ⚛️ **React, Vue & Svelte** — `route()` and `route.isCurrent()` resolve through ferry on every frontend, in dev and production (the `.url` codemod sugar is React/plain-TS only)
 
 Nothing is written into your project tree. Runtime code is delivered as Vite virtual modules, types as one generated ambient `.d.ts`, and everything regenerates on every run.
 
@@ -74,6 +74,8 @@ route('users.destroy', { user: 1 })                      // { url, method } for 
 route<string>('users.show', { user: 1 })                // explicit string: '/users/1'
 route('users.index', { page: 2 })                        // extra keys become the query string: '/users?page=2'
 ```
+
+Any string-typed type argument works the same way — a string literal (`route<'fixed'>(...)`) or a type alias resolving to `string` all return a real `string` and get the `.url` sugar; a non-string type argument (`route<number>(...)`) is a type error.
 
 Current-route checks work the same way, with route-name prefixes validated at compile time:
 
@@ -188,21 +190,15 @@ public function show(User $user)
 }
 ```
 
-In a React/plain-TS page component under your Pages root, the codemod injects the generic into a bare `usePage()` call automatically:
+In a page component, import the generated props type and pass it to `usePage()` explicitly — the same as any shared component:
 
 ```tsx
 // resources/js/Pages/Users/Show.tsx
-const page = usePage(); // codemod injects -> usePage<UsersShowProps>()
-page.props.user;        // UserResource
-page.props.status;      // OrderStatus
-```
-
-In a shared component, or in Vue/Svelte (where the generic can't be injected post-compile), import the type explicitly:
-
-```ts
 import type { UsersShowProps } from '@ferry/pages';
 
 const page = usePage<UsersShowProps>();
+page.props.user;        // UserResource
+page.props.status;      // OrderStatus
 ```
 
 Shared data from `HandleInertiaRequests::share()` fills Inertia's own `InertiaConfig.sharedPageProps` augmentation and `errorValueType`, so `page.props.auth` and validation errors are typed everywhere without any per-page wiring.
@@ -213,15 +209,13 @@ Shared data from `HandleInertiaRequests::share()` fills Inertia's own `InertiaCo
 ferry({
   cwd: process.cwd(),
   strict: false,
-  pagesDir: ['resources/js/Pages', 'resources/js/pages'],
 })
 ```
 
-| Option     | Type                   | Default                                              | Description                                                                                                    |
-| ---------- | ---------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `cwd`      | `string`               | `process.cwd()`                                       | Root of the Laravel app ferry reads from (`app/Enums`, `app/Http/Resources`, `routes`, etc.)                     |
-| `strict`   | `boolean`              | `false`                                               | Fallback type for a field ferry can't resolve statically. `false` → `any` (never breaks a typecheck); `true` → `unknown` (forces the consumer to narrow) |
-| `pagesDir` | `string \| string[]`   | `['resources/js/Pages', 'resources/js/pages']`        | Inertia page-component root(s), relative to `cwd`, used to resolve a page's props type for `usePage()` injection |
+| Option   | Type      | Default          | Description                                                                                                    |
+| -------- | --------- | ---------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `cwd`    | `string`  | `process.cwd()`  | Root of the Laravel app ferry reads from (`app/Enums`, `app/Http/Resources`, `routes`, etc.)                     |
+| `strict` | `boolean` | `false`          | Fallback type for a field ferry can't resolve statically. `false` → `any` (never breaks a typecheck); `true` → `unknown` (forces the consumer to narrow) |
 
 ## Testing
 
