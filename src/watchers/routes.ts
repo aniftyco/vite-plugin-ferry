@@ -2,7 +2,9 @@ import { join, basename } from 'node:path';
 import type { ViteDevServer } from 'vite';
 import type { Delivery } from '../delivery/index.js';
 import { registerRoutes, type RouteTable } from '../generators/routes.js';
+import { getPhpFilesRecursive } from '../utils/file.js';
 import { logError, logFileChange, logRegeneration } from '../utils/banner.js';
+import { setupFileWatcher } from './watch.js';
 
 export type RouteWatcherOptions = {
   routesDir: string;
@@ -14,31 +16,36 @@ export type RouteWatcherOptions = {
 };
 
 /**
- * Watch the app's route files. On a change it re-runs `route:list`, re-registers the
- * `@ferry/route` runtime and its declarations, rewrites the ambient types, and triggers
- * a full reload — route patterns are inlined at call sites by the codemod, so a route
- * change requires re-transforming every module, not just invalidating one virtual module.
+ * Watch the app's route files. On adding, editing, or deleting one it re-runs `route:list`,
+ * re-registers the `@ferry/route` runtime and its declarations, rewrites the ambient types,
+ * and triggers a full reload. Route patterns are inlined at call sites by the codemod, and
+ * source modules don't import the PHP route files, so Vite's cached transforms would keep
+ * serving the old inlined patterns — the whole module graph is invalidated before the reload
+ * to force every module to re-transform against the new table.
  */
 export function setupRouteWatcher(options: RouteWatcherOptions): void {
   const { routesDir, cwd, delivery, server, onTable } = options;
 
-  server.watcher.add(join(routesDir, '**/*.php'));
+  setupFileWatcher(server, {
+    patterns: [join(routesDir, '**/*.php')],
+    initialFiles: getPhpFilesRecursive(routesDir),
+    owns: (filePath) => filePath.startsWith(routesDir),
+    onChange: (filePath) => {
+      try {
+        logFileChange('routes', basename(filePath));
 
-  server.watcher.on('change', (filePath: string) => {
-    if (!filePath.startsWith(routesDir)) return;
+        const table = registerRoutes({ cwd, delivery });
+        onTable(table);
+        delivery.writeTypes();
 
-    try {
-      logFileChange('routes', basename(filePath));
+        // Clear cached transforms so re-transformed modules pick up the new inlined patterns.
+        server.moduleGraph.invalidateAll();
+        server.ws.send({ type: 'full-reload' });
 
-      const table = registerRoutes({ cwd, delivery });
-      onTable(table);
-      delivery.writeTypes();
-
-      server.ws.send({ type: 'full-reload' });
-
-      logRegeneration('routes');
-    } catch (e) {
-      logError('routes', 'Error regenerating route types', e);
-    }
+        logRegeneration('routes');
+      } catch (e) {
+        logError('routes', 'Error regenerating route types', e);
+      }
+    },
   });
 }
