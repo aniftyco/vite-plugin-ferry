@@ -10,6 +10,9 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "start": "tsc --watch",
     "build": "rm -rf dist/ && tsc",
@@ -26,9 +29,11 @@
     "@inertiajs/core": "^3.7.0",
     "@types/node": "^24",
     "prettier": "^3.6.2",
+    "svelte": "^5.57.0",
     "typescript": "^5.9.2",
     "vite": "^7.3.0",
-    "vitest": "^4.0.16"
+    "vitest": "^4.0.16",
+    "vue": "^3.5.42"
   },
   "peerDependencies": {
     "typescript": "^5.0.0"
