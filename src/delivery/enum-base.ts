@@ -13,7 +13,7 @@ export const ENUM_BASE_RUNTIME = `export class Enum {
     return other.value === this.value;
   }
   toString() {
-    return this.value;
+    return String(this.value);
   }
   static from(value) {
     return this.cases().find((c) => c.value === value);

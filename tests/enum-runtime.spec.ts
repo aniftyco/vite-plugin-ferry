@@ -111,6 +111,12 @@ describe('base Enum runtime behavior (E12)', () => {
     expect(Priority.from(3)).toBe(Priority.HIGH);
   });
 
+  it('toString() returns a string for an int-backed enum (honoring the toString(): string contract)', () => {
+    expect(Priority.LOW.toString()).toBe('1');
+    expect(typeof Priority.LOW.toString()).toBe('string');
+    expect(`${Priority.HIGH}`).toBe('3');
+  });
+
   it('leaves label undefined for an unlabeled enum', () => {
     expect(Role.ADMIN.label).toBeUndefined();
     expect(Role.options()).toEqual([
