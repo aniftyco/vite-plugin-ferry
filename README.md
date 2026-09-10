@@ -233,10 +233,6 @@ npm test
 
 Issues and pull requests are welcome.
 
-## Security
-
-If you discover a security vulnerability, please email josh@joshmanders.com instead of opening a public issue.
-
 ## License
 
 See [LICENSE](LICENSE) for details.
