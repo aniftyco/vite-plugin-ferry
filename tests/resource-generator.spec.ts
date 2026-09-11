@@ -534,6 +534,36 @@ describe('resolved property forms (static shape + metadata merge)', () => {
   });
 });
 
+describe('array_merge(parent::toArray(), [...]) resolves inline keys (#20)', () => {
+  const inputs = collectResourceInputs({
+    resourcesDir: join(fixturesDir, 'Resources'),
+    modelsDir: join(fixturesDir, 'Models'),
+    enumsDir: join(fixturesDir, 'Enums'),
+    cwd: fixturesDir,
+  });
+  const { resources, warnings } = buildResources(inputs, metadata, false, new Set(['OrderStatus']));
+
+  it('types the inline literal keys instead of bailing to Record<string, any>', () => {
+    const entry = resources.MergedResource;
+    expect(entry?.kind).toBe('shape');
+    const f = (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+
+    // Model-backed inline keys resolve through metadata; a literal resolves statically.
+    expect(f.id).toEqual({ type: 'number', optional: false });
+    expect(f.name).toEqual({ type: 'string', optional: false });
+    expect(f.label).toEqual({ type: 'string', optional: false });
+  });
+
+  it('applies a per-field @ferry pin on the merged resource', () => {
+    const f = (resources.MergedResource as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+    expect(f.meta).toEqual({ type: 'Record<string, string>', optional: false });
+  });
+
+  it('produces no "could not statically analyze" warning for the merged resource', () => {
+    expect(warnings.some((w) => w.includes('MergedResource') && w.includes('could not statically analyze'))).toBe(false);
+  });
+});
+
 const circularOrderStatus: EnumDefinition = {
   name: 'OrderStatus',
   backing: 'string',

@@ -1037,13 +1037,31 @@ export function parseResourceFieldsAst(
 
   if (!toArrayMethod || !toArrayMethod.body) return null;
 
-  // Find return statement with array
+  // Find the return statement. Accept a bare `return [...]` and the
+  // `return array_merge(parent::toArray($request), [...])` shape: the inline array literals
+  // (a single array, or the array arguments of the merge call) are what we can analyze.
+  // parent::toArray() is not followed — it's the vendor JsonResource, which isn't app source.
   const returnNode = findNodeByKind(toArrayMethod.body, 'return') as PhpParserTypes.Return | null;
-  if (!returnNode || !returnNode.expr || returnNode.expr.kind !== 'array') return null;
+  const expr = returnNode?.expr;
 
-  const arrayNode = returnNode.expr as PhpParserTypes.Array;
+  const arrays: PhpParserTypes.Array[] =
+    expr?.kind === 'array'
+      ? [expr as PhpParserTypes.Array]
+      : expr?.kind === 'call'
+        ? ((expr as PhpParserTypes.Call).arguments ?? []).filter(
+            (a): a is PhpParserTypes.Array => a?.kind === 'array'
+          )
+        : [];
+
+  if (arrays.length === 0) return null;
+
   const modelName = options.modelName ?? extractMixinModel(phpContent) ?? undefined;
-  const entries = parseArrayEntries(arrayNode.items, { ...options, resourceClass: className, modelName });
+
+  // Merge each inline array in order; later arrays override earlier keys.
+  const entries: ReturnType<typeof parseArrayEntries> = {};
+  for (const arr of arrays) {
+    Object.assign(entries, parseArrayEntries(arr.items, { ...options, resourceClass: className, modelName }));
+  }
 
   // Convert to flat field info
   const result: Record<string, ResourceFieldInfo> = {};
