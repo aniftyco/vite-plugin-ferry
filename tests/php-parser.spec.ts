@@ -360,6 +360,44 @@ describe('parseResourceFieldsAst', () => {
     expect(r.comments).toMatchObject({ type: 'CommentResource[]', optional: true });
   });
 
+  it('infers a whenLoaded closure return instead of typing by the relation name', () => {
+    const content = readFixture('Resources/LoadedResource.php');
+    const resourcesDir = join(fixturesDir, 'Resources');
+    const result = parseResourceFieldsAst(content, { resourcesDir });
+
+    expect(result).not.toBeNull();
+    const r = result!;
+
+    // Closure returning an inline array literal -> that shape, keys included, key optional.
+    expect(r.stats).toEqual({ type: '{ active: boolean; label: string }', optional: true });
+
+    // Closure returning a related-model attribute records the relation + attribute (no guessed
+    // scalar type) so the merge resolves the real type; the key is optional.
+    expect(r.author_name).toMatchObject({ relation: 'author', attribute: 'name', optional: true });
+    expect(r.author_age).toMatchObject({ relation: 'author', attribute: 'age', optional: true });
+    expect(r.author_price).toMatchObject({ relation: 'author', attribute: 'price', optional: true });
+
+    // Resolution is global — a plain related attribute records the same, key present.
+    expect(r.plain_author_name).toMatchObject({ relation: 'author', attribute: 'name', optional: false });
+
+    // Closure returning a literal scalar.
+    expect(r.kind).toEqual({ type: 'string', optional: true });
+
+    // Explicit default -> key present, value unioned with the default's type.
+    expect(r.author_or_flag).toMatchObject({
+      relation: 'author',
+      attribute: 'name',
+      optional: false,
+      unionWith: 'boolean',
+    });
+
+    // Unresolvable relation still records the relation + attribute; the merge degrades it.
+    expect(r.ghost).toMatchObject({ relation: 'ghost', attribute: 'title', optional: true });
+
+    // No-closure whenLoaded still resolves to the relation's resource, key optional (#12 behavior).
+    expect(r.user).toEqual({ type: 'UserResource', optional: true });
+  });
+
   it('degrades an unrecognized form to an undecidable any', () => {
     const content = dedent`
       <?php

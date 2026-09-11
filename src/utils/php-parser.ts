@@ -415,6 +415,11 @@ export type ResourceFieldInfo = {
   /** Append `| null` to the (kept) static type when this source column is nullable — a
    * `new XResource($this->col)` / `XResource::make($this->col)` over a nullable attribute. */
   nullFromColumn?: string;
+  /** A related model's attribute read (`$this->author->name`): the relation method and the
+   * attribute accessed. The merge resolves the real leaf type through the relation's dumped
+   * metadata, degrading with a warning when the relation or attribute can't be resolved. */
+  relation?: string;
+  attribute?: string;
 };
 
 export type ResourceArrayEntry = {
@@ -524,6 +529,51 @@ function extractResourceProperty(node: PhpParserTypes.Node): string | null {
     if (name && name !== 'resource') return name;
   }
 
+  return null;
+}
+
+/**
+ * Extract a related-model attribute read — `$this->rel->attr`, where `rel` is a loaded
+ * relation (anything but `resource`, which is the model itself). Returns the relation and
+ * attribute (`$this->author->name` → `{ relation: 'author', attribute: 'name' }`). The
+ * attribute belongs to a DIFFERENT model than the resource's own, so the merge resolves its
+ * real type through the relation's dumped metadata rather than the resource's own columns.
+ */
+function extractRelatedAttribute(node: PhpParserTypes.Node): { relation: string; attribute: string } | null {
+  if (node.kind !== 'propertylookup') return null;
+
+  const lookup = node as PhpParserTypes.PropertyLookup;
+  const what = lookup.what;
+  if (what.kind !== 'propertylookup') return null;
+
+  const inner = what as PhpParserTypes.PropertyLookup;
+  if (inner.what.kind !== 'variable' || (inner.what as PhpParserTypes.Variable).name !== 'this') return null;
+
+  const relation = inner.offset.kind === 'identifier' ? (inner.offset as PhpParserTypes.Identifier).name : null;
+  if (!relation || relation === 'resource') return null;
+
+  const attribute = lookup.offset.kind === 'identifier' ? (lookup.offset as PhpParserTypes.Identifier).name : null;
+  if (!attribute) return null;
+
+  return { relation, attribute };
+}
+
+/**
+ * The expression a `whenLoaded` value closure returns: the arrow-function body directly
+ * (`fn () => expr`), or the first `return` expression in a `function () { ... }` block.
+ * Null when the argument isn't a closure ferry can read.
+ */
+function closureReturnExpression(node: PhpParserTypes.Node): PhpParserTypes.Node | null {
+  if (node.kind === 'arrowfunc') {
+    return ((node as any).body as PhpParserTypes.Node) ?? null;
+  }
+  if (node.kind === 'closure') {
+    const body = (node as any).body as PhpParserTypes.Node | undefined;
+    if (body) {
+      const ret = findNodeByKind(body, 'return') as PhpParserTypes.Return | null;
+      if (ret && ret.expr) return ret.expr;
+    }
+  }
   return null;
 }
 
@@ -656,8 +706,32 @@ function handleInstanceMethod(
   const args = (call.arguments ?? []) as PhpParserTypes.Node[];
 
   switch (name) {
-    // whenLoaded('rel') — resolve the relation's resource when it exists, else a loose record.
+    // whenLoaded('rel'[, closure[, default]]).
     case 'whenLoaded': {
+      // With a value closure (2nd arg), the field type is what the closure RETURNS, not the
+      // relation — an inline array literal keeps its keys, a scalar stays a scalar. An explicit
+      // default (3rd arg) makes the key present and unions the value with the default's type.
+      if (args.length >= 2) {
+        const returned = closureReturnExpression(args[1]);
+        if (returned) {
+          const info = inferTypeFromAstNode(returned, key, options);
+          if (args.length >= 3) {
+            const defaultInfo = inferTypeFromAstNode(args[2], key, options);
+            info.optional = false;
+            if (defaultInfo.undecidable) {
+              return { type: 'any', optional: false, undecidable: true };
+            }
+            info.unionWith = defaultInfo.type;
+            if (defaultInfo.column) info.unionWithColumn = defaultInfo.column;
+            return info;
+          }
+          info.optional = true;
+          return info;
+        }
+        // 2nd arg isn't a closure ferry can read — fall through to relation resolution.
+      }
+
+      // No closure: resolve the relation's resource when it exists, else a loose record.
       if (resourcesDir && args.length > 0 && args[0].kind === 'string') {
         const relationName = (args[0] as PhpParserTypes.String).value;
         if (relationName.length > 0) {
@@ -804,6 +878,14 @@ export function inferTypeFromAstNode(
   const prop = extractResourceProperty(node);
   if (prop) {
     return resolveColumnField(prop, false, options);
+  }
+
+  // A related model's attribute (`$this->author->name`): record the relation + attribute so
+  // the merge can resolve its real leaf type through the relation's dumped metadata. Never a
+  // name-based guess — the merge degrades to a `@ferry` warning when it can't resolve it.
+  const relatedAttr = extractRelatedAttribute(node);
+  if (relatedAttr) {
+    return { type: 'any', optional, relation: relatedAttr.relation, attribute: relatedAttr.attribute };
   }
 
   // Literals and simple computed scalars.

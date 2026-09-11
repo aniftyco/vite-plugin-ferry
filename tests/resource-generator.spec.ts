@@ -478,6 +478,39 @@ describe('resolved property forms (static shape + metadata merge)', () => {
     expect(f.comments).toEqual({ type: 'CommentResource[]', optional: true });
   });
 
+  it('types whenLoaded fields by their closure return, resolving related attributes to real types', () => {
+    const f = fieldsOf('LoadedResource');
+
+    // Inline array literal -> that shape; literal scalar -> the scalar. Key-optional.
+    expect(f.stats).toEqual({ type: '{ active: boolean; label: string }', optional: true });
+    expect(f.kind).toEqual({ type: 'string', optional: true });
+
+    // Related-model attributes resolve to their REAL type through the relation's metadata:
+    // name -> string, age -> number (would be mis-typed as string by a name guess),
+    // a decimal price column -> number. Global resolution: plain_author_name resolves too.
+    expect(f.author_name).toEqual({ type: 'string', optional: true });
+    expect(f.author_age).toEqual({ type: 'number', optional: true });
+    expect(f.author_price).toEqual({ type: 'number', optional: true });
+    expect(f.plain_author_name).toEqual({ type: 'string', optional: false });
+
+    // Explicit default -> key present, closure | default (author.name: string | boolean).
+    expect(f.author_or_flag).toEqual({ type: 'string | boolean', optional: false });
+
+    // No-closure whenLoaded -> the relation's resource, key optional (#12 behavior).
+    expect(f.user).toEqual({ type: 'UserResource', optional: true });
+  });
+
+  it('degrades an unresolvable related attribute to any with a warning, never a name guess', () => {
+    const { resources, warnings } = buildResources(inputs, metadata, false, new Set(['OrderStatus']));
+    const entry = resources.LoadedResource;
+    expect(entry?.kind).toBe('shape');
+    const f = (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+
+    // The 'ghost' relation is never dumped -> degrade to any, key optional preserved.
+    expect(f.ghost).toEqual({ type: 'any', optional: true });
+    expect(warnings.some((w) => w.includes('LoadedResource.ghost'))).toBe(true);
+  });
+
   it('the generated block compiles with circular relations and no skipLibCheck', () => {
     const { resources: all, enumNames } = buildResources(inputs, metadata, false, new Set(['OrderStatus']));
     const block = generateResourcesDtsBlock(all, enumNames);

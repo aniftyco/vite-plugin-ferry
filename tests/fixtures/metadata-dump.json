@@ -38,6 +38,20 @@
       "score": "integer",
       "joined_at": "datetime",
       "deleted_at": "datetime"
+    },
+    "relations": {
+      "author": {
+        "columns": [
+          { "name": "id", "type_name": "bigint", "nullable": false, "default": null },
+          { "name": "name", "type_name": "varchar", "nullable": false, "default": null },
+          { "name": "age", "type_name": "integer", "nullable": false, "default": null },
+          { "name": "price", "type_name": "decimal", "nullable": false, "default": null }
+        ],
+        "casts": {
+          "id": "integer",
+          "age": "integer"
+        }
+      }
     }
   }
 }

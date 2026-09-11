@@ -34,11 +34,20 @@ export type ColumnMeta = {
   default?: unknown;
 };
 
-/** A model's metadata: its table's columns and its `getCasts()` map. */
+/** A related model's columns and casts, dumped by walking a relation method. Lets the merge
+ * resolve a `$this->author->name` read to the author model's real column/cast type. */
+export type RelatedMeta = {
+  columns: ColumnMeta[];
+  casts: Record<string, string>;
+};
+
+/** A model's metadata: its table's columns, its `getCasts()` map, and — for the relations
+ * a resource actually reads through (`$this->rel->attr`) — the related model's metadata. */
 export type ModelMeta = {
   table?: string;
   columns: ColumnMeta[];
   casts: Record<string, string>;
+  relations?: Record<string, RelatedMeta>;
 };
 
 /** The metadata dump, keyed by model class short name (`Order`, `User`). */
@@ -110,6 +119,28 @@ const PRIMITIVE_CASTS = new Set([
  * into a `MetadataDump`. Defensive: ignores malformed entries rather than throwing, so
  * a partial or unexpected dump degrades to whatever it could read.
  */
+function parseColumns(raw: unknown): ColumnMeta[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((c: any) => c && typeof c.name === 'string')
+    .map((c: any) => ({
+      name: c.name,
+      type_name: String(c.type_name ?? c.type ?? ''),
+      nullable: Boolean(c.nullable),
+      default: c.default,
+    }));
+}
+
+function parseCasts(raw: unknown): Record<string, string> {
+  const casts: Record<string, string> = {};
+  if (raw && typeof raw === 'object') {
+    for (const [attr, cast] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof cast === 'string') casts[attr] = cast;
+    }
+  }
+  return casts;
+}
+
 export function parseMetadataDump(raw: unknown): MetadataDump {
   const out: MetadataDump = {};
   if (!raw || typeof raw !== 'object') return out;
@@ -117,28 +148,20 @@ export function parseMetadataDump(raw: unknown): MetadataDump {
   for (const [model, value] of Object.entries(raw as Record<string, any>)) {
     if (!value || typeof value !== 'object') continue;
 
-    const columns: ColumnMeta[] = Array.isArray(value.columns)
-      ? value.columns
-          .filter((c: any) => c && typeof c.name === 'string')
-          .map((c: any) => ({
-            name: c.name,
-            type_name: String(c.type_name ?? c.type ?? ''),
-            nullable: Boolean(c.nullable),
-            default: c.default,
-          }))
-      : [];
-
-    const casts: Record<string, string> = {};
-    if (value.casts && typeof value.casts === 'object') {
-      for (const [attr, cast] of Object.entries(value.casts)) {
-        if (typeof cast === 'string') casts[attr] = cast;
+    let relations: Record<string, RelatedMeta> | undefined;
+    if (value.relations && typeof value.relations === 'object') {
+      relations = {};
+      for (const [rel, relValue] of Object.entries(value.relations as Record<string, any>)) {
+        if (!relValue || typeof relValue !== 'object') continue;
+        relations[rel] = { columns: parseColumns(relValue.columns), casts: parseCasts(relValue.casts) };
       }
     }
 
     out[model] = {
       table: typeof value.table === 'string' ? value.table : undefined,
-      columns,
-      casts,
+      columns: parseColumns(value.columns),
+      casts: parseCasts(value.casts),
+      ...(relations ? { relations } : {}),
     };
   }
 
@@ -263,9 +286,11 @@ export type MergeResourceOptions = {
  * each leaf is (including `null` from a nullable column). Precedence per field:
  *
  * 1. `@ferry` annotation → the raw TS type, verbatim.
- * 2. Metadata leaf type via the field's source column (a cast wins over the raw column).
- * 3. Undecidable field → the strict-mode fallback (`unknown`) or `any`, plus a warning.
- * 4. Otherwise the static type.
+ * 2. Related-model attribute → the real leaf type via the relation's dumped metadata, else
+ *    a degrade + warning (never a name-based guess).
+ * 3. Metadata leaf type via the field's source column (a cast wins over the raw column).
+ * 4. Undecidable field → the strict-mode fallback (`unknown`) or `any`, plus a warning.
+ * 5. Otherwise the static type.
  */
 export function mergeResourceFields(options: MergeResourceOptions): Record<string, MergedField> {
   const { resourceName, model, staticFields, metadata, annotations, strict, knownEnums, enumNames, warnings } = options;
@@ -274,14 +299,18 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
   const columns = new Map<string, ColumnMeta>((meta?.columns ?? []).map((c) => [c.name, c]));
   const casts = meta?.casts ?? {};
 
-  /** Resolve one column to its TypeScript leaf type through the metadata dump (cast beats
-   * raw column, nullability composed). Returns `'unresolved'` for a class cast that isn't a
-   * known ferry enum, or null when the column has no metadata at all. */
-  const resolveLeaf = (columnName: string): string | 'unresolved' | null => {
-    const col = columns.get(columnName);
+  /** Resolve an attribute to its TypeScript leaf type against a given column/cast set (cast
+   * beats raw column, nullability composed). Returns `'unresolved'` for a class cast that
+   * isn't a known ferry enum, or null when the attribute has no metadata at all. */
+  const resolveAttr = (
+    cols: Map<string, ColumnMeta>,
+    castMap: Record<string, string>,
+    attr: string
+  ): string | 'unresolved' | null => {
+    const col = cols.get(attr);
     const nullable = col?.nullable ?? false;
-    if (casts[columnName] !== undefined) {
-      const resolved = resolveCast(casts[columnName], knownEnums);
+    if (castMap[attr] !== undefined) {
+      const resolved = resolveCast(castMap[attr], knownEnums);
       if (resolved.unresolved) return 'unresolved';
       if (resolved.enum) enumNames.add(resolved.enum);
       return nullable ? `${resolved.type} | null` : resolved.type;
@@ -289,6 +318,9 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
     if (col) return mapColumnType(col.type_name, col.nullable);
     return null;
   };
+
+  /** Resolve one of the resource's own columns through the model's metadata. */
+  const resolveLeaf = (columnName: string): string | 'unresolved' | null => resolveAttr(columns, casts, columnName);
 
   /** Apply the field's leaf-type modifiers: strip a nullable, add a nullable from a source
    * column, then union in a `when()` default. Order matters — stripNull clears the `| null`
@@ -346,7 +378,24 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
       if (leaf !== null) unionAddend = leaf;
     }
 
-    // 2. Metadata leaf type via the source column (cast beats column type). Nullability
+    // 2. Related-model attribute (`$this->author->name`): resolve its real leaf type through
+    //    the relation's dumped metadata. Never a name-based guess — degrade with a warning
+    //    when the relation wasn't dumped or the attribute isn't a real column/cast on it.
+    if (info.relation && info.attribute) {
+      const relMeta = meta?.relations?.[info.relation];
+      if (relMeta) {
+        const relCols = new Map<string, ColumnMeta>(relMeta.columns.map((c) => [c.name, c]));
+        const leaf = resolveAttr(relCols, relMeta.casts, info.attribute);
+        if (leaf !== null && leaf !== 'unresolved') {
+          out[field] = { type: finalize(leaf, info, unionAddend), optional };
+          continue;
+        }
+      }
+      out[field] = degrade(field, optional);
+      continue;
+    }
+
+    // 3. Metadata leaf type via the source column (cast beats column type). Nullability
     //    of the underlying column composes with either — a nullable column adds `| null`.
     const column = info.column;
     if (column) {
@@ -371,13 +420,13 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
       }
     }
 
-    // 3. Undecidable field — degrade instead of failing the build.
+    // 4. Undecidable field — degrade instead of failing the build.
     if (info.undecidable) {
       out[field] = degrade(field, optional);
       continue;
     }
 
-    // 4. Static type (includes enum names resolved from static casts).
+    // 5. Static type (includes enum names resolved from static casts).
     out[field] = { type: finalize(info.type, info, unionAddend), optional };
   }
 
@@ -597,24 +646,50 @@ export function collectResourceInputs(options: {
  * Build the PHP dump script. A temp file (rather than a giant inline `--execute`
  * string) keeps the multi-statement expression off the shell command line, where its
  * quoting is fragile; tinker just `require`s it. Each model is guarded independently so
- * a missing class or table skips that model instead of aborting the whole dump. Output
- * is wrapped in sentinels so tinker's own banner/echo can be stripped.
+ * a missing class or table skips that model instead of aborting the whole dump.
+ *
+ * `relationsByModel` names the relations each model reads through (`$this->rel->attr`),
+ * keyed by the model's short name. For each, the script walks the relation method to its
+ * related model and dumps that model's columns/casts, so the merge can type the attribute
+ * from the real related schema. Each relation is guarded independently — a relation that
+ * can't be instantiated is skipped, and the merge degrades that field with a warning.
+ * Output is wrapped in sentinels so tinker's own banner/echo can be stripped.
  */
-function buildDumpScript(modelClasses: string[]): string {
+function buildDumpScript(modelClasses: string[], relationsByModel: Record<string, string[]> = {}): string {
   const list = modelClasses.map((c) => `'${c.replace(/\\/g, '\\\\')}'`).join(', ');
+  const relEntries = Object.entries(relationsByModel)
+    .filter(([, rels]) => rels.length > 0)
+    .map(([model, rels]) => `'${model}' => [${rels.map((r) => `'${r}'`).join(', ')}]`)
+    .join(', ');
   return [
     '<?php',
     '$ferryOut = [];',
     `$ferryModels = [${list}];`,
+    `$ferryRelations = [${relEntries}];`,
     'foreach ($ferryModels as $ferryClass) {',
     '    if (!class_exists($ferryClass)) { continue; }',
     '    try {',
     '        $ferryModel = new $ferryClass();',
+    '        $ferryShort = class_basename($ferryClass);',
     '        $ferryTable = $ferryModel->getTable();',
-    '        $ferryOut[class_basename($ferryClass)] = [',
+    '        $ferryRelOut = [];',
+    '        foreach ($ferryRelations[$ferryShort] ?? [] as $ferryRel) {',
+    '            try {',
+    '                if (!method_exists($ferryModel, $ferryRel)) { continue; }',
+    '                $ferryRelation = $ferryModel->{$ferryRel}();',
+    '                if (!($ferryRelation instanceof \\Illuminate\\Database\\Eloquent\\Relations\\Relation)) { continue; }',
+    '                $ferryRelated = $ferryRelation->getRelated();',
+    '                $ferryRelOut[$ferryRel] = [',
+    "                    'columns' => \\Illuminate\\Support\\Facades\\Schema::getColumns($ferryRelated->getTable()),",
+    "                    'casts' => $ferryRelated->getCasts(),",
+    '                ];',
+    '            } catch (\\Throwable $ferryRelErr) { continue; }',
+    '        }',
+    '        $ferryOut[$ferryShort] = [',
     "            'table' => $ferryTable,",
     "            'columns' => \\Illuminate\\Support\\Facades\\Schema::getColumns($ferryTable),",
     "            'casts' => $ferryModel->getCasts(),",
+    "            'relations' => $ferryRelOut,",
     '        ];',
     '    } catch (\\Throwable $ferryErr) { continue; }',
     '}',
@@ -637,10 +712,14 @@ function extractSentinel(stdout: string): string | null {
  * it degrades to an empty dump (resources then fall back to their static shape) rather
  * than breaking the build.
  */
-export function dumpMetadata(cwd: string, models: string[]): MetadataDump {
+export function dumpMetadata(
+  cwd: string,
+  models: string[],
+  relationsByModel: Record<string, string[]> = {}
+): MetadataDump {
   if (models.length === 0) return {};
 
-  const script = buildDumpScript(models.map((m) => `App\\Models\\${m}`));
+  const script = buildDumpScript(models.map((m) => `App\\Models\\${m}`), relationsByModel);
   const tmpFile = join(tmpdir(), `ferry-metadata-${process.pid}-${Date.now()}.php`);
 
   try {
@@ -680,7 +759,19 @@ export function registerResources({ resourcesDir, modelsDir, cwd, delivery, stri
 
   const inputs = collectResourceInputs({ resourcesDir, modelsDir, enumsDir, cwd, strict });
   const models = [...new Set(inputs.map((i) => i.model))].filter(Boolean);
-  const metadata = dumpMetadata(cwd, models);
+
+  // The relations each model reads through (`$this->rel->attr`), so the dump can walk them
+  // to the related model and type the attribute from its real schema.
+  const relationsByModel: Record<string, string[]> = {};
+  for (const input of inputs) {
+    if (!input.model || !input.staticFields) continue;
+    const rels = relationsByModel[input.model] ?? (relationsByModel[input.model] = []);
+    for (const info of Object.values(input.staticFields)) {
+      if (info.relation && !rels.includes(info.relation)) rels.push(info.relation);
+    }
+  }
+
+  const metadata = dumpMetadata(cwd, models, relationsByModel);
 
   // The enums ferry actually generates into `@ferry/enums`. A metadata cast is only
   // treated as an enum reference when its class short name is in this set.
