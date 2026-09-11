@@ -65,6 +65,24 @@ describe('route() runtime resolver', () => {
     expect(route('/', undefined, 'get').url).toBe('/');
   });
 
+  it('fills a scoped binding by its binding name, without leaking to the query string', () => {
+    expect(route('/posts/{post:slug}/edit', { post: 'hello-world' }, 'get').url).toBe('/posts/hello-world/edit');
+  });
+
+  it('fills a scoped binding in a non-final path segment', () => {
+    expect(route('/apps/{application:slug}/overview', { application: 'my-app' }, 'get').url).toBe(
+      '/apps/my-app/overview'
+    );
+  });
+
+  it('keeps a present optional scoped binding', () => {
+    expect(route('/posts/{post:slug?}/edit', { post: 'hello-world' }, 'get').url).toBe('/posts/hello-world/edit');
+  });
+
+  it('drops an absent optional scoped binding and its slash', () => {
+    expect(route('/posts/{post:slug?}', {}, 'get').url).toBe('/posts');
+  });
+
   it('coerces to its url via String() and template literals', () => {
     const result = route('/users/{user}', { user: 1 }, 'get');
     expect(String(result)).toBe('/users/1');
@@ -115,5 +133,22 @@ describe('route.isCurrent() runtime', () => {
   it('ignores extra (query) keys when comparing the path with params', () => {
     (globalThis as any).window = { location: { pathname: '/users/1' } };
     expect(route.isCurrent('/users/{user}', { user: 1, tab: 'a' })).toBe(true);
+  });
+
+  it('matches a scoped-binding pattern against the current path', () => {
+    (globalThis as any).window = { location: { pathname: '/posts/hello-world/edit' } };
+    expect(route.isCurrent('/posts/{post:slug}/edit')).toBe(true);
+    expect(route.isCurrent('/posts/{post:slug}')).toBe(false);
+  });
+
+  it('matches the concrete scoped-binding value when params are passed', () => {
+    (globalThis as any).window = { location: { pathname: '/posts/hello-world/edit' } };
+    expect(route.isCurrent('/posts/{post:slug}/edit', { post: 'hello-world' })).toBe(true);
+    expect(route.isCurrent('/posts/{post:slug}/edit', { post: 'other' })).toBe(false);
+  });
+
+  it('treats an absent optional scoped binding as matching', () => {
+    (globalThis as any).window = { location: { pathname: '/posts' } };
+    expect(route.isCurrent('/posts/{post:slug?}')).toBe(true);
   });
 });

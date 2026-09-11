@@ -12,7 +12,7 @@
  */
 export const ROUTE_RUNTIME = `function fill(pattern, params) {
   const values = { ...(params || {}) };
-  let url = pattern.replace(/\\{(\\w+)\\??\\}/g, (_, key) => {
+  let url = pattern.replace(/\\{(\\w+)(?::\\w+)?\\??\\}/g, (_, key) => {
     if (Object.prototype.hasOwnProperty.call(values, key) && values[key] != null) {
       const v = values[key];
       delete values[key];
@@ -42,8 +42,8 @@ function toRegExp(pattern) {
   const OPT = '\\x00OPT\\x00';
   const REQ = '\\x00REQ\\x00';
   let source = pattern
-    .replace(/\\/\\{\\w+\\?\\}/g, OPT)
-    .replace(/\\{\\w+\\??\\}/g, REQ)
+    .replace(/\\/\\{\\w+(?::\\w+)?\\?\\}/g, OPT)
+    .replace(/\\{\\w+(?::\\w+)?\\??\\}/g, REQ)
     .replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&')
     .split(OPT).join('(?:/[^/]+)?')
     .split(REQ).join('[^/]+');
