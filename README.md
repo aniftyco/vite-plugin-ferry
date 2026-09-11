@@ -192,7 +192,7 @@ public function toArray(Request $request): array
 
 ### Page props — `@ferry/pages`
 
-Ferry reads every `Inertia::render('Users/Show', [...])` across your controllers and infers each prop's type using the same resource/enum machinery, then generates a props type per page served from `@ferry/pages`.
+Ferry reads every `Inertia::render('Users/Show', [...])` across your controllers and infers each prop's type using the same resource/enum machinery, then generates a props type per page served from `@ferry/pages`. Props whose value is a bare closure or `Inertia::merge(...)` resolve to their real value type and stay required, while `Inertia::defer(...)`, `Inertia::optional(...)`, and `Inertia::lazy(...)` resolve to their value type but are typed optional, since they're absent on the initial page load.
 
 ```php
 // app/Http/Controllers/UserController.php

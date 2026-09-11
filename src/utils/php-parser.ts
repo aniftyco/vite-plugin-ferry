@@ -615,7 +615,7 @@ function extractRelatedAttribute(node: PhpParserTypes.Node): { relation: string;
  * (`fn () => expr`), or the first `return` expression in a `function () { ... }` block.
  * Null when the argument isn't a closure ferry can read.
  */
-function closureReturnExpression(node: PhpParserTypes.Node): PhpParserTypes.Node | null {
+export function closureReturnExpression(node: PhpParserTypes.Node): PhpParserTypes.Node | null {
   if (node.kind === 'arrowfunc') {
     return ((node as any).body as PhpParserTypes.Node) ?? null;
   }

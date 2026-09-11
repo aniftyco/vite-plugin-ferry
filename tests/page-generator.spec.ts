@@ -86,6 +86,45 @@ describe('collectRenderInputs (Inertia::render analysis)', () => {
     expect(report.fields.summary.undecidable).toBe(true);
     expect(report.fields.summary.type).toBe('any');
   });
+
+  it('resolves closure and Inertia partial-reload wrappers to their inner resource types', () => {
+    const page = renderInputs().find((i) => i.key === 'Partials/Show')!;
+    expect(page).toBeTruthy();
+
+    // Bare closure prop -> the returned resource type, always evaluated so required.
+    expect(page.fields.user.type).toBe('UserResource');
+    expect(page.fields.user.optional).toBe(false);
+    expect(page.fields.user.undecidable).toBeUndefined();
+
+    // Inertia::defer(fn () => Resource::collection(...)) -> Resource[], omitted on load so optional.
+    expect(page.fields.orders.type).toBe('OrderResource[]');
+    expect(page.fields.orders.optional).toBe(true);
+
+    // Inertia::optional / Inertia::lazy -> inner resource type, optional.
+    expect(page.fields.profile.type).toBe('UserResource');
+    expect(page.fields.profile.optional).toBe(true);
+    expect(page.fields.posts.type).toBe('PostResource[]');
+    expect(page.fields.posts.optional).toBe(true);
+
+    // Inertia::merge(...) -> present on load, so required.
+    expect(page.fields.stats.type).toBe('OrderResource');
+    expect(page.fields.stats.optional).toBe(false);
+    expect(page.fields.stats.undecidable).toBeUndefined();
+  });
+
+  it('surfaces the @ferry/resources import for wrapper-resolved resource props', () => {
+    const { pages } = buildPages(renderInputs(), false);
+    const partial = pages.find((p) => p.typeName === 'PartialsShowProps')!;
+
+    expect(partial.type).toContain('user: UserResource');
+    expect(partial.type).toContain('orders?: OrderResource[]');
+    expect(partial.type).toContain('profile?: UserResource');
+    expect(partial.type).toContain('posts?: PostResource[]');
+    expect(partial.type).toContain('stats: OrderResource');
+
+    const block = generatePagesDtsBlock(pages, knownResources, knownEnums);
+    expect(block).toContain(`from '@ferry/resources'`);
+  });
 });
 
 describe('buildPages', () => {
@@ -417,6 +456,16 @@ describe('generated page types (tsc --noEmit consumer check)', () => {
       const id: number = page.props.id;
       const status: OrderStatus = page.props.status;
       const owner = page.props.auth.user;
+
+      // A deferred/optional prop (e.g. Inertia::defer/optional/lazy or whenLoaded) resolves
+      // to \`T | undefined\` and must be narrowed before use.
+      const maybeUser = page.props.user;
+      if (maybeUser) {
+        const uid: number = maybeUser.id;
+      }
+
+      // @ts-expect-error a deferred prop is possibly undefined until narrowed
+      const eager: number = page.props.user.id;
 
       // routes' declarations still coexist in the same ambient file.
       const url: string = route('users.show', { user: 1 }).url;

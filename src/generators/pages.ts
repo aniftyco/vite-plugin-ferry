@@ -9,6 +9,7 @@ import {
   findAllNodesByKind,
   findNodeByKind,
   inferTypeFromAstNode,
+  closureReturnExpression,
   getNodeStringValue,
   extractFerryAnnotations,
   type ResourceFieldInfo,
@@ -154,9 +155,59 @@ export function inferPropType(node: any, key: string, options: InferOptions): Re
     return { type: 'any[]', optional: false };
   }
 
+  // A bare closure prop (`'x' => fn () => <expr>` / `function () { return <expr>; }`).
+  // Inertia always evaluates and sends these, so the prop stays required; its type is the
+  // closure's returned expression, resolved through the same inference.
+  if (node.kind === 'arrowfunc' || node.kind === 'closure') {
+    const returned = closureReturnExpression(node);
+    if (returned) return inferPropType(returned, key, options);
+    return { type: 'any', optional: false, undecidable: true };
+  }
+
+  // Inertia partial-reload wrappers (`Inertia::defer|lazy|optional|merge(...)`): resolve the
+  // inner value's type. `defer`/`lazy`/`optional` are omitted on initial load, so the honest
+  // key is optional; `merge` props are present on load, so the key stays required.
+  const wrapper = inertiaWrapper(node);
+  if (wrapper) {
+    const info = inferPropType(wrapper.inner, key, options);
+    return { ...info, optional: wrapper.optional || info.optional };
+  }
+
   // Everything else → the shared resource inference (resource refs, key heuristics,
   // undecidable → degrade signal).
   return inferTypeFromAstNode(node, key, { resourcesDir, modelsDir, enumsDir });
+}
+
+/**
+ * Detect an Inertia partial-reload wrapper (`Inertia::defer|lazy|optional|merge(...)`) and
+ * return the inner value node to resolve plus whether the prop is optional. `defer`/`lazy`/
+ * `optional` take a closure and are omitted on initial load (optional); `merge` takes a value
+ * or closure and is present on load (required). Returns null for anything else — including an
+ * `defer`/`lazy`/`optional` call whose argument isn't a closure ferry can read — so the caller
+ * falls back to the existing behavior.
+ */
+function inertiaWrapper(node: any): { inner: any; optional: boolean } | null {
+  if (!node || node.kind !== 'call') return null;
+
+  const what = node.what;
+  if (what?.kind !== 'staticlookup' || what.what?.kind !== 'name') return null;
+  if (shortName(what.what.name) !== 'Inertia') return null;
+
+  const method = what.offset?.kind === 'identifier' ? what.offset.name : null;
+  const args = node.arguments ?? [];
+  if (!method || args.length === 0) return null;
+
+  if (method === 'defer' || method === 'lazy' || method === 'optional') {
+    const returned = closureReturnExpression(args[0]);
+    return returned ? { inner: returned, optional: true } : null;
+  }
+
+  if (method === 'merge') {
+    const returned = closureReturnExpression(args[0]);
+    return { inner: returned ?? args[0], optional: false };
+  }
+
+  return null;
 }
 
 /** Infer the shape of a keyed PHP array's entries. */
