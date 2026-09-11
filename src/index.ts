@@ -1,11 +1,12 @@
 import { join } from 'node:path';
-import type { Plugin } from 'vite';
+import type { LogLevel, Plugin } from 'vite';
 import { transformRoutes, transformRoutesPost } from './codemod/routes.js';
 import { createDelivery } from './delivery/index.js';
 import { registerEnums } from './generators/enums.js';
 import { registerPages } from './generators/pages.js';
 import { registerResources } from './generators/resources.js';
 import { registerRoutes, type RouteTable } from './generators/routes.js';
+import { logError, setVerbosity, type Verbosity } from './utils/banner.js';
 import { setupEnumWatcher } from './watchers/enums.js';
 import { setupPageWatcher } from './watchers/pages.js';
 import { setupResourceWatcher } from './watchers/resources.js';
@@ -18,6 +19,14 @@ export type ResourceTypesPluginOptions = {
    * → `any` (never breaks a typecheck); `true` → `unknown` (forces the consumer to narrow).
    */
   strict?: boolean;
+  /**
+   * How much ferry logs, ordered by severity: `silent` < `error` < `warn` < `info`. A
+   * message prints only when its severity is at or below this level, so `error` shows only
+   * errors, `warn` adds warnings, and `info` (the default) shows everything. Build-failing
+   * errors always throw regardless of this setting. When unset, ferry inherits vite's own
+   * `logLevel`, falling back to `info`.
+   */
+  verbosity?: Verbosity;
 };
 
 /**
@@ -37,6 +46,13 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
   // Apply defaults
   const cwd = options.cwd ?? process.cwd();
   const strict = options.strict ?? false;
+
+  // Resolve the effective verbosity: the explicit option wins, then vite's own
+  // `logLevel` (its values match ours exactly), then `info`. Vite's LogLevel and
+  // our Verbosity are the same string union, so this is a direct pass-through.
+  function resolveVerbosity(viteLogLevel?: LogLevel): Verbosity {
+    return options.verbosity ?? viteLogLevel ?? 'info';
+  }
 
   // Directory paths
   const enumsDir = join(cwd, 'app/Enums');
@@ -98,11 +114,16 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
     // virtual-module registrations exist before any consumer needs them. `config` fires
     // on both `vite dev` and `vite build`, and dev-time freshness is the watchers' job,
     // so this is the sole generation pass — no duplicate PHP subprocess spawns.
-    config() {
+    config(userConfig) {
+      // The generation pass below can log, and `config` fires before `configResolved`,
+      // so resolve and apply the level here first — reading the incoming config's
+      // `logLevel` as the fallback when no explicit `verbosity` was given.
+      setVerbosity(resolveVerbosity(userConfig.logLevel));
+
       try {
         generateAll();
       } catch (e) {
-        console.error(`[${name}] Error generating types during config():`, e);
+        logError(name, 'Error generating types during config()', e);
       }
 
       return {
@@ -110,6 +131,13 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
           exclude: [`${namespace}/enums`, `${namespace}/resources`, `${namespace}/route`, `${namespace}/pages`],
         },
       };
+    },
+
+    // Authoritative resolution once vite has merged config. The `config` hook already
+    // set a level for the generation pass; re-apply from the resolved `logLevel` so the
+    // dev watchers set up below honor it too.
+    configResolved(config) {
+      setVerbosity(resolveVerbosity(config.logLevel));
     },
 
     // Set up watchers for dev server

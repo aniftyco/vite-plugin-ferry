@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Delivery } from '../delivery/index.js';
+import { logWarn } from '../utils/banner.js';
 import { getPhpFiles, readFileSafe } from '../utils/file.js';
 import { parseEnumContent, type EnumCase, type EnumDefinition } from '../utils/php-parser.js';
 
@@ -136,7 +137,7 @@ export function collectEnums(enumsDir: string, cwd: string): Record<string, Enum
       }
     } catch (e) {
       // Ignore parse errors
-      console.warn(`Failed to parse enum file: ${file}`, e);
+      logWarn('enums', `Failed to parse enum file: ${file} (${e})`);
     }
   }
 

@@ -240,13 +240,15 @@ When `share()` calls `parent::share()`, ferry follows it into an app-local base 
 ferry({
   cwd: process.cwd(),
   strict: false,
+  verbosity: 'info',
 })
 ```
 
-| Option   | Type      | Default          | Description                                                                                                    |
-| -------- | --------- | ---------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `cwd`    | `string`  | `process.cwd()`  | Root of the Laravel app ferry reads from (`app/Enums`, `app/Http/Resources`, `routes`, etc.)                     |
-| `strict` | `boolean` | `false`          | Fallback type for a field ferry can't resolve statically. `false` → `any` (never breaks a typecheck); `true` → `unknown` (forces the consumer to narrow) |
+| Option      | Type                                        | Default            | Description                                                                                                    |
+| ----------- | ------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `cwd`       | `string`                                    | `process.cwd()`    | Root of the Laravel app ferry reads from (`app/Enums`, `app/Http/Resources`, `routes`, etc.)                     |
+| `strict`    | `boolean`                                   | `false`            | Fallback type for a field ferry can't resolve statically. `false` → `any` (never breaks a typecheck); `true` → `unknown` (forces the consumer to narrow) |
+| `verbosity` | `'silent' \| 'error' \| 'warn' \| 'info'`   | vite's `logLevel`  | How much ferry logs, ordered by severity `silent` < `error` < `warn` < `info`. A message prints only when its severity is at or below this level: `error` shows only errors, `warn` adds warnings, `info` shows everything, `silent` shows nothing. When unset, ferry inherits vite's own `logLevel`, falling back to `info`. Build-failing errors always abort the build regardless of this setting. |
 
 ## Testing
 
