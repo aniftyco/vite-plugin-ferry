@@ -216,7 +216,23 @@ page.props.user;        // UserResource
 page.props.status;      // OrderStatus
 ```
 
-Shared data from `HandleInertiaRequests::share()` fills Inertia's own `InertiaConfig.sharedPageProps` augmentation and `errorValueType`, so `page.props.auth` and validation errors are typed everywhere without any per-page wiring.
+Shared data from `HandleInertiaRequests::share()` fills Inertia's own `InertiaConfig.sharedPageProps` augmentation and `errorValueType`, so `page.props.auth` and validation errors are typed everywhere without any per-page wiring. `share()` is read the same way as `toArray()` — statically-resolvable entries infer directly, and the same `@ferry <prop> <type>` docblock pin applies. On `share()` the pin also **declares** a prop: a conditionally-shared value that never resolves statically (or one not present in the returned array at all) becomes a typed shared prop from the annotation alone.
+
+```php
+/**
+ * @ferry flash { message?: string }
+ * @ferry settings Record<string, string>
+ */
+public function share(Request $request): array
+{
+    return array_merge(parent::share($request), [
+        'auth' => ['user' => new UserResource($request->user())],
+        'settings' => $request->user()->settings(), // ferry can't resolve this -> annotate it
+    ]);
+}
+```
+
+When `share()` calls `parent::share()`, ferry follows it into an app-local base middleware and merges that parent's shared props in too — the child wins on any key collision. A vendor or otherwise unlocatable parent (such as Inertia's base `Middleware`) is skipped silently.
 
 ## Configuration
 

@@ -263,10 +263,104 @@ export function collectRenderInputs(options: {
   return inputs;
 }
 
+/** Find a class node's `share` method, if any. */
+function findShareMethod(classNode: any): any {
+  return (findAllNodesByKind(classNode, 'method') as any[]).find((m) => {
+    const name = typeof m.name === 'string' ? m.name : m.name?.name;
+    return name === 'share';
+  });
+}
+
+/** Whether a `share()` body calls `parent::share(...)`. */
+function referencesParentShare(body: any): boolean {
+  const lookups = findAllNodesByKind(body, 'staticlookup') as any[];
+  return lookups.some(
+    (n) =>
+      n.what?.kind === 'parentreference' && (n.offset?.kind === 'identifier' ? n.offset.name : null) === 'share'
+  );
+}
+
 /**
- * Read `HandleInertiaRequests::share()` and collect the shared-data shape. Handles a
- * direct `return [...]` and `return array_merge(parent::share($request), [...])`. Absent
- * middleware or method degrades to an empty shape rather than failing the build.
+ * Resolve the parent class's own `share()` fields when a child calls `parent::share()`.
+ * The parent is located by short name in `middlewareDir` — the same directory + short-name
+ * convention resources/models/enums use — so an app-local base middleware resolves and a
+ * vendor parent (e.g. Inertia's base `Middleware`, unlocatable in app source) is skipped
+ * silently. `seen` guards against re-parsing and cyclic `extends`.
+ */
+function collectParentShareFields(
+  classNode: any,
+  middlewareDir: string,
+  inferOptions: InferOptions,
+  seen: Set<string>
+): Record<string, ResourceFieldInfo> {
+  const parent = classNode.extends;
+  const parentName = parent?.kind === 'name' ? shortName(parent.name) : null;
+  if (!parentName) return {};
+
+  const parentPath = join(middlewareDir, `${parentName}.php`);
+  if (seen.has(parentPath) || !existsSync(parentPath)) return {};
+  seen.add(parentPath);
+
+  const ast = parsePhp(readFileSafe(parentPath) || '');
+  if (!ast) return {};
+  const parentClass = findNodeByKind(ast, 'class');
+  if (!parentClass) return {};
+
+  return collectShareFields(parentClass, middlewareDir, inferOptions, seen);
+}
+
+/**
+ * Harvest the statically-resolvable shared-data fields from a class's `share()`: the inline
+ * array literals (a bare `return [...]`, or the array arguments of an
+ * `array_merge(parent::share(...), [...])` call), the parent's own `share()` fields when the
+ * body calls `parent::share()`, and the docblock `@ferry <prop> <TS type>` pins. Pins
+ * create-or-override a prop verbatim — declaring conditionally-shared props that never
+ * resolve statically and clearing degradation on ones that do. On key collisions the child's
+ * inline fields and pins take precedence over inherited parent fields.
+ */
+function collectShareFields(
+  classNode: any,
+  middlewareDir: string,
+  inferOptions: InferOptions,
+  seen: Set<string>
+): Record<string, ResourceFieldInfo> {
+  const method = findShareMethod(classNode);
+  if (!method?.body) return {};
+
+  const returnNode = findNodeByKind(method.body, 'return') as any;
+  const expr = returnNode?.expr;
+
+  const arrays: any[] =
+    expr?.kind === 'array'
+      ? [expr]
+      : expr?.kind === 'call'
+        ? (expr.arguments ?? []).filter((a: any) => a?.kind === 'array')
+        : [];
+
+  // Parent fields first, so the child's own inline fields and pins override them.
+  const fields: Record<string, ResourceFieldInfo> = {};
+  if (referencesParentShare(method.body)) {
+    Object.assign(fields, collectParentShareFields(classNode, middlewareDir, inferOptions, seen));
+  }
+
+  for (const arr of arrays) {
+    Object.assign(fields, parseEntries(arr.items ?? [], inferOptions));
+  }
+
+  for (const [prop, type] of Object.entries(extractFerryAnnotations(methodDocText(method)))) {
+    fields[prop] = fields[prop]
+      ? { ...fields[prop], type, undecidable: false }
+      : { type, optional: false, undecidable: false };
+  }
+
+  return fields;
+}
+
+/**
+ * Read `HandleInertiaRequests::share()` and collect the shared-data shape. Handles a direct
+ * `return [...]` and `return array_merge(parent::share($request), [...])`, follows
+ * `parent::share()` into an app-local base middleware, and applies `@ferry` docblock pins.
+ * Absent middleware or method degrades to an empty shape rather than failing the build.
  */
 export function collectSharedInput(options: {
   middlewareDir: string;
@@ -288,31 +382,8 @@ export function collectSharedInput(options: {
     const classNode = findNodeByKind(ast, 'class');
     if (!classNode) return { fields: {} };
 
-    const method = (findAllNodesByKind(classNode, 'method') as any[]).find((m) => {
-      const name = typeof m.name === 'string' ? m.name : m.name?.name;
-      return name === 'share';
-    });
-    if (!method?.body) return { fields: {} };
-
-    const returnNode = findNodeByKind(method.body, 'return') as any;
-    const expr = returnNode?.expr;
-    if (!expr) return { fields: {} };
-
-    // Collect the top-level array literals: the return itself, or array arguments to
-    // an `array_merge(parent::share(...), [...])` call.
-    const arrays: any[] =
-      expr.kind === 'array'
-        ? [expr]
-        : expr.kind === 'call'
-          ? (expr.arguments ?? []).filter((a: any) => a?.kind === 'array')
-          : [];
-
-    const fields: Record<string, ResourceFieldInfo> = {};
-    for (const arr of arrays) {
-      Object.assign(fields, parseEntries(arr.items ?? [], inferOptions));
-    }
-
-    return { fields };
+    const seen = new Set<string>([filePath]);
+    return { fields: collectShareFields(classNode, middlewareDir, inferOptions, seen) };
   } catch (e) {
     logWarn('pages', `Failed to parse HandleInertiaRequests: ${e}`);
     return { fields: {} };

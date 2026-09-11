@@ -152,6 +152,56 @@ describe('collectSharedInput (HandleInertiaRequests::share)', () => {
 
     expect(shared.fields).toEqual({});
   });
+
+  it('applies @ferry pins on share(): declares a new conditionally-shared prop and clears an unresolvable one', () => {
+    const shared = collectSharedInput({
+      middlewareDir: join(fixturesDir, 'MiddlewarePinned'),
+      resourcesDir: join(fixturesDir, 'Resources'),
+      modelsDir: join(fixturesDir, 'Models'),
+      enumsDir: join(fixturesDir, 'Enums'),
+      knownEnums,
+    });
+
+    // A statically-resolvable prop is untouched.
+    expect(shared.fields.auth.type).toBe('{ user: UserResource }');
+
+    // `settings` is an unresolvable method call; without the pin it would degrade. The
+    // pin types it verbatim and clears the "could not be resolved statically" signal (AC4).
+    expect(shared.fields.settings.type).toBe('Record<string, string>');
+    expect(shared.fields.settings.undecidable).toBe(false);
+
+    // `flash` is never in the returned array — the pin declares it outright (AC2).
+    expect(shared.fields.flash.type).toBe('{ message: string }');
+    expect(shared.fields.flash.undecidable).toBe(false);
+
+    // The observable outcome of AC4: the degradation warning is actually suppressed. Run the
+    // pinned fields through the same finalize path buildPages uses; no "could not be resolved
+    // statically" warning is emitted for the pinned `settings` prop.
+    const { warnings } = buildPages([{ key: 'share()', fields: shared.fields }], false);
+    expect(warnings.some((w) => w.includes('settings') && w.includes('could not be resolved statically'))).toBe(
+      false
+    );
+  });
+
+  it('merges parent::share() fields, with the child taking precedence on collisions (AC1)', () => {
+    const shared = collectSharedInput({
+      middlewareDir: join(fixturesDir, 'MiddlewareWithParent'),
+      resourcesDir: join(fixturesDir, 'Resources'),
+      modelsDir: join(fixturesDir, 'Models'),
+      enumsDir: join(fixturesDir, 'Enums'),
+      knownEnums,
+    });
+
+    // The child's own inline prop.
+    expect(shared.fields.auth.type).toBe('{ user: UserResource }');
+
+    // A prop only the parent's share() declares still appears in the shared shape.
+    expect(shared.fields.appName.type).toBe('string');
+
+    // Both define `version`; the child's inline value wins over the parent's unresolvable one.
+    expect(shared.fields.version.type).toBe('number');
+    expect(shared.fields.version.undecidable).toBeUndefined();
+  });
 });
 
 describe('generateInertiaAugmentation', () => {
