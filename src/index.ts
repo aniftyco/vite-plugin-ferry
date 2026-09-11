@@ -3,11 +3,13 @@ import type { LogLevel, Plugin } from 'vite';
 import { transformRoutes, transformRoutesPost } from './codemod/routes.js';
 import { createDelivery } from './delivery/index.js';
 import { registerEnums } from './generators/enums.js';
+import { registerForms } from './generators/forms.js';
 import { registerPages } from './generators/pages.js';
 import { registerResources } from './generators/resources.js';
 import { registerRoutes, type RouteTable } from './generators/routes.js';
 import { logError, setVerbosity, type Verbosity } from './utils/banner.js';
 import { setupEnumWatcher } from './watchers/enums.js';
+import { setupFormWatcher } from './watchers/forms.js';
 import { setupPageWatcher } from './watchers/pages.js';
 import { setupResourceWatcher } from './watchers/resources.js';
 import { setupRouteWatcher } from './watchers/routes.js';
@@ -61,6 +63,7 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
   const routesDir = join(cwd, 'routes');
   const controllersDir = join(cwd, 'app/Http/Controllers');
   const middlewareDir = join(cwd, 'app/Http/Middleware');
+  const requestsDir = join(cwd, 'app/Http/Requests');
 
   // Delivery layer: virtual modules (runtime) + ambient .d.ts (types).
   const delivery = createDelivery(cwd);
@@ -84,6 +87,9 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
 
     // Register @ferry/pages (per-page prop types) and the @inertiajs/core augmentation.
     registerPages({ controllersDir, middlewareDir, resourcesDir, modelsDir, cwd, delivery, strict });
+
+    // Register @ferry/forms (per-FormRequest data-shape types) for typed useForm<T>().
+    registerForms({ requestsDir, cwd, delivery, strict });
 
     // Write the ambient declarations file from the registered d.ts blocks.
     delivery.writeTypes();
@@ -128,7 +134,13 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
 
       return {
         optimizeDeps: {
-          exclude: [`${namespace}/enums`, `${namespace}/resources`, `${namespace}/route`, `${namespace}/pages`],
+          exclude: [
+            `${namespace}/enums`,
+            `${namespace}/resources`,
+            `${namespace}/route`,
+            `${namespace}/pages`,
+            `${namespace}/forms`,
+          ],
         },
       };
     },
@@ -177,6 +189,15 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
         middlewareDir,
         resourcesDir,
         modelsDir,
+        cwd,
+        delivery,
+        server,
+        strict,
+      });
+
+      // Set up form-request watcher
+      setupFormWatcher({
+        requestsDir,
         cwd,
         delivery,
         server,

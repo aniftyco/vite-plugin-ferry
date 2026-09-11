@@ -1,0 +1,266 @@
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { describe, it, expect } from 'vitest';
+import { assembleAmbientTypes } from '../src/delivery/ambient-types.js';
+import { ENUM_BASE_DTS } from '../src/delivery/enum-base.js';
+import {
+  FORM_RUNTIME,
+  collectFormInputs,
+  buildForms,
+  generateFormsDtsBlock,
+  type FormEntry,
+  type FormInput,
+} from '../src/generators/forms.js';
+import { parseFormRequestRules } from '../src/utils/php-parser.js';
+import { dedent } from './utils.js';
+
+const fixturesDir = join(import.meta.dirname, 'fixtures');
+const repoRoot = join(import.meta.dirname, '..');
+const require = createRequire(import.meta.url);
+const tscPath = require.resolve('typescript/bin/tsc');
+
+function formInputs(): FormInput[] {
+  return collectFormInputs({ requestsDir: join(fixturesDir, 'Requests'), cwd: fixturesDir });
+}
+
+function fieldsOf(forms: Record<string, FormEntry>, name: string): Record<string, { type: string; optional: boolean }> {
+  const entry = forms[name];
+  expect(entry?.kind).toBe('shape');
+  return (entry as Extract<FormEntry, { kind: 'shape' }>).fields;
+}
+
+describe('FORM_RUNTIME', () => {
+  it('is an empty type-only module', () => {
+    expect(FORM_RUNTIME).toBe('export {};\n');
+  });
+});
+
+describe('parseFormRequestRules', () => {
+  it('reads pipe-string and array rule tokens, dropping non-string items', () => {
+    const php = dedent`
+      <?php
+      class StoreUserRequest {
+          public function rules(): array
+          {
+              return [
+                  'name' => 'required|string',
+                  'active' => ['required', 'boolean'],
+                  'avatar' => ['required', Rule::exists('files', 'id')],
+                  'callback' => ['required', function ($a, $v, $f) {}],
+              ];
+          }
+      }
+    `;
+
+    expect(parseFormRequestRules(php)).toEqual({
+      name: ['required', 'string'],
+      active: ['required', 'boolean'],
+      // The Rule::exists(...) item carries no static token and is dropped.
+      avatar: ['required'],
+      // The closure item is dropped too.
+      callback: ['required'],
+    });
+  });
+
+  it('returns null when no rules() method returning an array literal is found', () => {
+    expect(parseFormRequestRules('<?php class Foo {}')).toBeNull();
+    expect(
+      parseFormRequestRules('<?php class Foo { public function rules(): array { return $this->all(); } }')
+    ).toBeNull();
+  });
+});
+
+describe('buildForms — rule → type mapping', () => {
+  it('maps scalar rules, nullable, sometimes, and in: enums off the fixtures', () => {
+    const { forms } = buildForms(formInputs(), false);
+    const f = fieldsOf(forms, 'StoreUserRequest');
+
+    // required|string / required|email -> string, key present.
+    expect(f.name).toEqual({ type: 'string', optional: false });
+    expect(f.email).toEqual({ type: 'string', optional: false });
+
+    // nullable|integer -> number | null, key present (nullable is a value modifier).
+    expect(f.age).toEqual({ type: 'number | null', optional: false });
+
+    // sometimes|string -> string, key optional.
+    expect(f.bio).toEqual({ type: 'string', optional: true });
+
+    // in: -> a string-literal union.
+    expect(f.role).toEqual({ type: "'admin' | 'editor' | 'viewer'", optional: false });
+
+    // array rule with array-item tokens -> boolean.
+    expect(f.active).toEqual({ type: 'boolean', optional: false });
+
+    // A bare array rule with no nested keys -> any[]; sometimes -> optional.
+    expect(f.tags).toEqual({ type: 'any[]', optional: true });
+  });
+
+  it('expands nested and wildcard keys into nested objects and arrays', () => {
+    const { forms } = buildForms(formInputs(), false);
+    const f = fieldsOf(forms, 'StoreUserRequest');
+
+    // profile.bio nests under profile; bio is nullable, key present.
+    expect(f.profile).toEqual({ type: '{ bio: string | null }', optional: false });
+
+    // items.*.id / items.*.label -> array of the nested object shape.
+    expect(f.items).toEqual({ type: '{ id: number; label: string | null }[]', optional: false });
+  });
+
+  it('degrades a field with no mappable rule to the fallback with a warning', () => {
+    const { forms, warnings } = buildForms(formInputs(), false);
+    const f = fieldsOf(forms, 'StoreUserRequest');
+
+    // avatar's only non-modifier rule (Rule::exists) was dropped -> no type signal -> any.
+    expect(f.avatar).toEqual({ type: 'any', optional: false });
+    // callback's closure rule dropped likewise.
+    expect(f.callback).toEqual({ type: 'any', optional: false });
+
+    expect(warnings.some((w) => w.includes('StoreUserRequest.avatar'))).toBe(true);
+    expect(warnings.some((w) => w.includes('StoreUserRequest.callback'))).toBe(true);
+  });
+
+  it('uses unknown as the fallback under strict:true', () => {
+    const { forms } = buildForms(formInputs(), true);
+    const f = fieldsOf(forms, 'StoreUserRequest');
+    expect(f.avatar).toEqual({ type: 'unknown', optional: false });
+  });
+
+  it('falls a form whose rules() cannot be analyzed back to a Record type with a warning', () => {
+    const { forms, warnings } = buildForms([{ className: 'WeirdRequest', rules: null }], false);
+    expect(forms.WeirdRequest).toEqual({ kind: 'fallback', record: 'any' });
+    expect(warnings[0]).toContain('WeirdRequest');
+  });
+});
+
+describe('collectFormInputs', () => {
+  it('collects every form request in the directory', () => {
+    const names = formInputs().map((i) => i.className);
+    expect(names).toContain('StoreUserRequest');
+    expect(names).toContain('UpdatePostRequest');
+  });
+
+  it('returns no forms when the requests directory is absent', () => {
+    expect(collectFormInputs({ requestsDir: join(fixturesDir, 'DoesNotExist'), cwd: fixturesDir })).toEqual([]);
+  });
+});
+
+describe('generateFormsDtsBlock', () => {
+  it('renders one export type per form request under the @ferry/forms module', () => {
+    const { forms } = buildForms(formInputs(), false);
+    const block = generateFormsDtsBlock(forms);
+
+    expect(block).toContain(`declare module '@ferry/forms' {`);
+    expect(block).toContain('export type StoreUserRequest = {');
+    expect(block).toContain('export type UpdatePostRequest = {');
+    expect(block).toContain("role: 'admin' | 'editor' | 'viewer';");
+    expect(block).toContain('items: { id: number; label: string | null }[];');
+    expect(block).toContain('profile: { bio: string | null };');
+    expect(block).toContain('bio?: string;');
+  });
+
+  it('emits an empty declare module block when there are no forms', () => {
+    expect(generateFormsDtsBlock({})).toBe(`declare module '@ferry/forms' {}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tsc --noEmit consumer check
+// ---------------------------------------------------------------------------
+
+/**
+ * Type-check a consumer against the assembled ambient script file. The temp project lives
+ * inside the repo so upward node_modules resolution finds the real `@inertiajs/core`, making
+ * the `FormDataKeys` error-key derivation a real check rather than a stub.
+ */
+function typecheck(ambient: string, consumer: string): { ok: boolean; output: string } {
+  const dir = mkdtempSync(join(repoRoot, 'ferry-forms-'));
+  try {
+    writeFileSync(join(dir, 'index.d.ts'), ambient, 'utf8');
+    writeFileSync(join(dir, 'consumer.ts'), consumer, 'utf8');
+    writeFileSync(
+      join(dir, 'tsconfig.json'),
+      JSON.stringify({
+        compilerOptions: {
+          strict: true,
+          target: 'esnext',
+          moduleResolution: 'bundler',
+          module: 'esnext',
+          skipLibCheck: true,
+          noEmit: true,
+          types: [],
+        },
+        files: ['index.d.ts', 'consumer.ts'],
+      }),
+      'utf8'
+    );
+
+    const result = spawnSync(process.execPath, [tscPath, '--project', join(dir, 'tsconfig.json')], {
+      encoding: 'utf8',
+    });
+
+    return { ok: result.status === 0, output: (result.stdout ?? '') + (result.stderr ?? '') };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('generated form types (tsc --noEmit consumer check)', () => {
+  const { forms } = buildForms(formInputs(), false);
+  const ambient = assembleAmbientTypes({ blocks: [ENUM_BASE_DTS, generateFormsDtsBlock(forms)] });
+
+  it('is a script-style ambient file (zero top-level import/export)', () => {
+    const topLevel = ambient.split('\n').filter((line) => /^(import|export)\b/.test(line));
+    expect(topLevel).toEqual([]);
+  });
+
+  it('types useForm<StoreUserRequest>() fields AND derives error keys via FormDataKeys', () => {
+    const consumer = dedent`
+      import type { StoreUserRequest } from '@ferry/forms';
+      import type { FormDataKeys } from '@inertiajs/core';
+
+      // A minimal useForm mirroring Inertia: the generic is the data shape, and error keys
+      // are derived from it by Inertia's own FormDataKeys<TForm>.
+      declare function useForm<T extends object>(data: T): {
+        data: T;
+        errors: Partial<Record<FormDataKeys<T>, string>>;
+        setData<K extends keyof T>(key: K, value: T[K]): void;
+      };
+
+      const form = useForm<StoreUserRequest>({
+        name: '',
+        email: '',
+        age: null,
+        role: 'admin',
+        active: true,
+        profile: { bio: null },
+        items: [{ id: 1, label: null }],
+        avatar: null,
+        callback: null,
+      });
+
+      // Field types are enforced from the rules.
+      const name: string = form.data.name;
+      const age: number | null = form.data.age;
+      const firstId: number = form.data.items[0].id;
+      const bio: string | null = form.data.profile.bio;
+      const role: 'admin' | 'editor' | 'viewer' = form.data.role;
+
+      // AC2: error keys resolve via FormDataKeys — top-level, nested, and wildcard-array.
+      const e1: string | undefined = form.errors['name'];
+      const e2: string | undefined = form.errors['profile.bio'];
+      const e3: string | undefined = form.errors['items.0.id'];
+      const e4: string | undefined = form.errors['role'];
+
+      // @ts-expect-error an unknown error key is rejected
+      const bad = form.errors['nope.nope'];
+
+      // @ts-expect-error age is number | null, not string
+      const badAge: string = form.data.age;
+    `;
+
+    const { ok, output } = typecheck(ambient, consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});

@@ -1,6 +1,6 @@
 # vite-plugin-ferry
 
-> Type-safe Inertia apps end to end — generates TypeScript for routes, enums, resources, and page props straight from your Laravel backend.
+> Type-safe Inertia apps end to end — generates TypeScript for routes, enums, resources, page props, and form types straight from your Laravel backend.
 
 [![npm version](https://img.shields.io/npm/v/vite-plugin-ferry.svg?style=flat-square)](https://www.npmjs.com/package/vite-plugin-ferry)
 [![npm downloads](https://img.shields.io/npm/dt/vite-plugin-ferry.svg?style=flat-square)](https://www.npmjs.com/package/vite-plugin-ferry)
@@ -12,6 +12,7 @@
 - 🏷️ **Enums** — PHP enums become real JS classes with `is`/`from`/`fromOrFail`/`values`/`keys`/`cases`/`options`, narrowed to their literal value union
 - 📦 **Resources** — precise types for your `JsonResource` classes from static shape analysis plus real column/cast metadata, degrading gracefully instead of breaking your build
 - 🧩 **Page props** — the props an Inertia page receives, typed through `usePage<T>()` and Inertia's own `sharedPageProps` augmentation
+- 📝 **Form types** — the data shape of your `FormRequest` classes, typed through `useForm<T>()` with `form.errors` keys derived for free
 - ⚛️ **React, Vue & Svelte** — `route()` and `route.isCurrent()` resolve through ferry on every frontend, in dev and production (the `.url` codemod sugar is React/plain-TS only)
 
 Nothing is written into your project tree. Runtime code is delivered as Vite virtual modules, types as one generated ambient `.d.ts`, and everything regenerates on every run.
@@ -233,6 +234,48 @@ public function share(Request $request): array
 ```
 
 When `share()` calls `parent::share()`, ferry follows it into an app-local base middleware and merges that parent's shared props in too — the child wins on any key collision. A vendor or otherwise unlocatable parent (such as Inertia's base `Middleware`) is skipped silently.
+
+### Form types — `@ferry/forms`
+
+Ferry reads every `FormRequest`'s `rules()` and generates a data-shape type per request, named by the class's verbatim short name and served from `@ferry/forms`. Pass it to `useForm<T>()` to type both the form data and — for free — the `form.errors` keys, which Inertia derives from the same shape via its own `FormDataKeys<T>`, including nested (`profile.bio`) and array (`items.0.id`) paths.
+
+```php
+// app/Http/Requests/StoreUserRequest.php
+public function rules(): array
+{
+    return [
+        'name' => 'required|string',
+        'age' => 'nullable|integer',
+        'role' => 'required|in:admin,editor,viewer',
+        'profile.bio' => ['nullable', 'string'],
+        'items.*.id' => ['required', 'integer'],
+    ];
+}
+```
+
+```ts
+declare module '@ferry/forms' {
+  export type StoreUserRequest = {
+    name: string;
+    age: number | null;
+    role: 'admin' | 'editor' | 'viewer';
+    profile: { bio: string | null };
+    items: { id: number }[];
+  };
+}
+```
+
+```tsx
+// resources/js/Pages/Users/Create.tsx
+import type { StoreUserRequest } from '@ferry/forms';
+
+const form = useForm<StoreUserRequest>({ name: '', age: null, role: 'admin', profile: { bio: null }, items: [] });
+form.data.role;             // 'admin' | 'editor' | 'viewer'
+form.errors['profile.bio']; // typed error key, derived from the shape
+form.errors['items.0.id'];  // wildcard array paths resolve too
+```
+
+Rule tokens map to leaf types — `string`/`email`/`url`/`uuid`/`date` → `string`, `integer`/`numeric`/`decimal` → `number`, `boolean` → `boolean`, `in:a,b,c` → a string-literal union, and `array` → `any[]` unless nested keys describe its shape. Dotted keys nest (`profile.bio` → `profile: { bio: ... }`) and a `*` segment becomes an array (`items.*.id` → `items: { id: ... }[]`). `nullable` unions `| null` onto the value; `sometimes` makes the key optional; every other field is present, since a form initializes all of them. A field whose only rule ferry can't map to a type — a `Rule::` object, a closure, or a rule with no type signal — degrades to `any` (or `unknown` under [`strict`](#configuration)) with a warning. A form with no matching `FormRequest` generates no type, and its `useForm()` call simply omits the generic as before.
 
 ## Configuration
 

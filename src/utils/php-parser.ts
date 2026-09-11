@@ -3,8 +3,8 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type * as PhpParserTypes from 'php-parser';
 import { readFileSafe } from './file.js';
-import { mapDocTypeToTs, mapPhpTypeToTs } from './type-mapper.js';
 import { renderKey } from './ts-keys.js';
+import { mapDocTypeToTs, mapPhpTypeToTs } from './type-mapper.js';
 
 // Import php-parser (CommonJS module with constructor)
 const require = createRequire(import.meta.url);
@@ -1108,9 +1108,7 @@ export function parseResourceFieldsAst(
     expr?.kind === 'array'
       ? [expr as PhpParserTypes.Array]
       : expr?.kind === 'call'
-        ? ((expr as PhpParserTypes.Call).arguments ?? []).filter(
-            (a): a is PhpParserTypes.Array => a?.kind === 'array'
-          )
+        ? ((expr as PhpParserTypes.Call).arguments ?? []).filter((a): a is PhpParserTypes.Array => a?.kind === 'array')
         : [];
 
   if (arrays.length === 0) return null;
@@ -1130,6 +1128,77 @@ export function parseResourceFieldsAst(
   }
 
   return result;
+}
+
+/**
+ * Parse a `FormRequest`'s `rules()` method into a map of field key → rule tokens. Finds the
+ * class, then its `rules` method, and reads the array literal it returns. Each entry's key is
+ * the field's (possibly dotted/wildcard) path; its value is either a pipe-string (`'required|
+ * string'` → `['required', 'string']`) or an array whose STRING items are tokens. Non-string
+ * items (`Rule::unique(...)`, closures, etc.) carry no static type signal and are dropped, so a
+ * field whose only rule is such an item resolves to an empty token list — the caller degrades it.
+ *
+ * Returns null when the class or a `rules()` method returning an array literal can't be found,
+ * so the caller falls the whole form back to a loose record rather than emitting a broken type.
+ */
+export function parseFormRequestRules(phpContent: string): Record<string, string[]> | null {
+  const ast = parsePhp(phpContent);
+  if (!ast) return null;
+
+  const classNode = findNodeByKind(ast, 'class') as PhpParserTypes.Class | null;
+  if (!classNode) return null;
+
+  const methods = findAllNodesByKind(classNode, 'method') as PhpParserTypes.Method[];
+  const rulesMethod = methods.find((m) => {
+    const methodName = typeof m.name === 'string' ? m.name : (m.name as PhpParserTypes.Identifier).name;
+    return methodName === 'rules';
+  });
+  if (!rulesMethod || !rulesMethod.body) return null;
+
+  const returnNode = findNodeByKind(rulesMethod.body, 'return') as PhpParserTypes.Return | null;
+  const expr = returnNode?.expr;
+  if (!expr || expr.kind !== 'array') return null;
+
+  const rules: Record<string, string[]> = {};
+
+  for (const item of (expr as PhpParserTypes.Array).items) {
+    if (item.kind !== 'entry') continue;
+    const entry = item as PhpParserTypes.Entry;
+    const key = entry.key ? getStringValue(entry.key) : null;
+    if (!key) continue;
+
+    rules[key] = ruleTokens(entry.value);
+  }
+
+  return rules;
+}
+
+/**
+ * The static rule tokens of a single rule value: a pipe-string split on `|`, or the STRING
+ * items of an array (non-string items — `Rule::...`, closures — are dropped). Anything else
+ * yields no tokens.
+ */
+function ruleTokens(value: PhpParserTypes.Node): string[] {
+  if (value.kind === 'string') {
+    return (value as PhpParserTypes.String).value
+      .split('|')
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+
+  if (value.kind === 'array') {
+    const tokens: string[] = [];
+    for (const item of (value as PhpParserTypes.Array).items) {
+      const node = item.kind === 'entry' ? (item as PhpParserTypes.Entry).value : (item as PhpParserTypes.Node);
+      if (node.kind === 'string') {
+        const token = (node as PhpParserTypes.String).value.trim();
+        if (token) tokens.push(token);
+      }
+    }
+    return tokens;
+  }
+
+  return [];
 }
 
 /**

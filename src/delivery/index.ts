@@ -1,14 +1,21 @@
 import { join } from 'node:path';
-import { VirtualModuleRegistry, DtsRegistry, ModuleFileRegistry } from './registry.js';
 import { writeAmbientTypes } from './ambient-types.js';
 import { ENUM_BASE_RUNTIME, ENUM_BASE_DTS } from './enum-base.js';
+import { VirtualModuleRegistry, DtsRegistry, ModuleFileRegistry } from './registry.js';
 
 export * from './registry.js';
 export * from './ambient-types.js';
 export * from './enum-base.js';
 
 /** The ferry virtual module ids served at runtime. */
-export const FERRY_MODULE_IDS = ['@ferry/enums', '@ferry/enum', '@ferry/resources', '@ferry/route', '@ferry/pages'] as const;
+export const FERRY_MODULE_IDS = [
+  '@ferry/enums',
+  '@ferry/enum',
+  '@ferry/resources',
+  '@ferry/route',
+  '@ferry/pages',
+  '@ferry/forms',
+] as const;
 
 /** Runtime placeholder for feature modules whose real content arrives in a later build-order step. */
 const PLACEHOLDER_RUNTIME = 'export {};\n';
@@ -40,7 +47,7 @@ function registerDefaults(virtual: VirtualModuleRegistry, dts: DtsRegistry): voi
   virtual.register('@ferry/enum', ENUM_BASE_RUNTIME);
   dts.register('@ferry/enum', ENUM_BASE_DTS);
 
-  for (const id of ['@ferry/route', '@ferry/pages']) {
+  for (const id of ['@ferry/route', '@ferry/pages', '@ferry/forms']) {
     virtual.register(id, PLACEHOLDER_RUNTIME);
     dts.register(id, placeholderDts(id));
   }
