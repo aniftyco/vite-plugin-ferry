@@ -7,6 +7,7 @@ import {
   extractDocblockArrayShape,
   extractFerryAnnotations,
   extractMixinModel,
+  parseModelPropertyShapes,
   parseResourceFieldsAst,
   type EnumDefinition,
   type ResourceFieldInfo,
@@ -73,6 +74,9 @@ export type ResourceInput = {
   staticFields: Record<string, ResourceFieldInfo> | null;
   /** `@ferry <field> <type>` docblock overrides. */
   annotations: Record<string, string>;
+  /** Class-level `@property array{...} $field` object shapes on the backing model, mapped to
+   * TS object literals. Each refines an array/json/collection field's bare `any[]` default. */
+  propertyShapes: Record<string, string>;
   /** Enum names collected while resolving static casts. */
   enumNames: string[];
 };
@@ -273,6 +277,9 @@ export type MergeResourceOptions = {
   staticFields: Record<string, ResourceFieldInfo>;
   metadata: MetadataDump;
   annotations: Record<string, string>;
+  /** Backing-model `@property array{...}` object shapes (TS literals), keyed by field. Each
+   * refines the bare `any[]` an array/json/collection cast (or a json column) resolves to. */
+  propertyShapes?: Record<string, string>;
   strict: boolean;
   /** The enum names ferry generates into `@ferry/enums`; a class cast is only treated as
    * an enum when its short name is in this set. */
@@ -297,6 +304,7 @@ export type MergeResourceOptions = {
  */
 export function mergeResourceFields(options: MergeResourceOptions): Record<string, MergedField> {
   const { resourceName, model, staticFields, metadata, annotations, strict, knownEnums, enumNames, warnings } = options;
+  const propertyShapes = options.propertyShapes ?? {};
 
   const meta = metadata[model];
   const columns = new Map<string, ColumnMeta>((meta?.columns ?? []).map((c) => [c.name, c]));
@@ -346,6 +354,20 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
       out = normalizeUnion(`${out} | ${unionAddend}`);
     }
     return out;
+  };
+
+  /** A documented `@property array{...}` object shape refines the bare `any[]` an
+   * array/json/collection cast (or a json column) resolves to, keeping any `| null`. Keyed by
+   * the SOURCE model attribute (`info.column`), matching how `propertyShapes` is keyed and the
+   * offline path's lookup — so a renamed field (`'prefs' => $this->settings`) still resolves.
+   * Attributes with no documented shape are untouched, so a plain array cast stays `any[]`. */
+  const refineArrayShape = (leaf: string, attribute: string): string => {
+    const shape = propertyShapes[attribute];
+    if (!shape) return leaf;
+    const parts = leaf.split('|').map((p) => p.trim());
+    if (parts[0] !== 'any[]') return leaf;
+    parts[0] = shape;
+    return parts.join(' | ');
   };
 
   const degrade = (field: string, optional: boolean): MergedField => {
@@ -414,11 +436,13 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
           continue;
         }
         if (resolved.enum) enumNames.add(resolved.enum);
-        out[field] = { type: finalize(nullable ? `${resolved.type} | null` : resolved.type, info, unionAddend), optional };
+        const leaf = refineArrayShape(nullable ? `${resolved.type} | null` : resolved.type, column);
+        out[field] = { type: finalize(leaf, info, unionAddend), optional };
         continue;
       }
       if (col) {
-        out[field] = { type: finalize(mapColumnType(col.type_name, col.nullable), info, unionAddend), optional };
+        const leaf = refineArrayShape(mapColumnType(col.type_name, col.nullable), column);
+        out[field] = { type: finalize(leaf, info, unionAddend), optional };
         continue;
       }
     }
@@ -470,6 +494,7 @@ export function buildResources(
       staticFields: input.staticFields,
       metadata,
       annotations: input.annotations,
+      propertyShapes: input.propertyShapes,
       strict,
       knownEnums,
       enumNames,
@@ -558,6 +583,26 @@ export function generateResourcesDtsBlock(resources: Record<string, ResourceEntr
 // Collection + metadata dump (file I/O + PHP)
 // ---------------------------------------------------------------------------
 
+/**
+ * Read the backing model's class-level `@property array{...} $field` object shapes and map
+ * each to a TS object literal, keyed by field. Empty when the model file is absent or
+ * documents no such shapes.
+ */
+function readModelPropertyShapes(modelsDir: string, model: string): Record<string, string> {
+  if (!modelsDir || !model) return {};
+  const modelPath = join(modelsDir, `${model}.php`);
+  if (!existsSync(modelPath)) return {};
+  const content = readFileSafe(modelPath);
+  if (!content) return {};
+
+  const shapes = parseModelPropertyShapes(content);
+  const mapped: Record<string, string> = {};
+  for (const [field, shape] of Object.entries(shapes)) {
+    mapped[field] = mapDocTypeToTs(shape);
+  }
+  return mapped;
+}
+
 /** Map a docblock array shape's field types to TypeScript. */
 function mapDocShape(docShape: Record<string, string>): Record<string, string> {
   const result: Record<string, string> = {};
@@ -620,6 +665,10 @@ export function collectResourceInputs(options: {
       // The backing model: the `@mixin` docblock when present, else the naming convention.
       const model = extractMixinModel(content) ?? className.replace(/Resource$/, '');
 
+      // Class-level `@property array{...}` object shapes on the model refine an
+      // array/json/collection cast's bare `any[]` into the documented object literal.
+      const propertyShapes = readModelPropertyShapes(modelsDir, model);
+
       const staticFields = parseResourceFieldsAst(content, {
         resourcesDir,
         modelsDir,
@@ -635,6 +684,7 @@ export function collectResourceInputs(options: {
         model,
         staticFields,
         annotations: extractFerryAnnotations(content),
+        propertyShapes,
         enumNames: Object.keys(collectedEnums),
       });
     } catch (e) {

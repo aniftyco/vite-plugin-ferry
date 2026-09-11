@@ -4,6 +4,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parseEnumContent,
   parseModelCasts,
+  parseModelPropertyShapes,
   extractDocblockArrayShape,
   extractMixinModel,
   parseResourceFieldsAst,
@@ -126,6 +127,53 @@ describe('parseModelCasts', () => {
   it('returns empty object for class without casts', () => {
     const result = parseModelCasts('<?php class Foo {}');
     expect(result).toEqual({});
+  });
+});
+
+describe('parseModelPropertyShapes', () => {
+  it('reads class-level @property array{...} object shapes, keyed by field', () => {
+    const content = readFixture('Models/Profile.php');
+    const result = parseModelPropertyShapes(content);
+
+    expect(result.settings).toBe('array{theme: string, notifications: bool}');
+    // A plain `@property array $tags` documents no object shape, so it contributes nothing.
+    expect(result.tags).toBeUndefined();
+  });
+
+  it('ignores plain and simple @property tags, keeping only array{...} shapes', () => {
+    const content = dedent`
+      <?php
+      /**
+       * @property int $id
+       * @property array $roles
+       * @property array{label: string, count: int} $summary
+       */
+      class Foo {}
+    `;
+    const result = parseModelPropertyShapes(content);
+
+    expect(result).toEqual({ summary: 'array{label: string, count: int}' });
+  });
+
+  it('reads a multiline @property array{...} shape', () => {
+    const content = dedent`
+      <?php
+      /**
+       * @property array{
+       *     street: string,
+       *     zip: string,
+       * } $address
+       */
+      class Foo {}
+    `;
+    const result = parseModelPropertyShapes(content);
+
+    expect(result.address).toBe('array{street: string, zip: string,}');
+  });
+
+  it('returns an empty object when no @property shapes exist', () => {
+    const content = readFixture('Models/User.php');
+    expect(parseModelPropertyShapes(content)).toEqual({});
   });
 });
 

@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type * as PhpParserTypes from 'php-parser';
 import { readFileSafe } from './file.js';
-import { mapPhpTypeToTs } from './type-mapper.js';
+import { mapDocTypeToTs, mapPhpTypeToTs } from './type-mapper.js';
 import { renderKey } from './ts-keys.js';
 
 // Import php-parser (CommonJS module with constructor)
@@ -313,6 +313,58 @@ export function parseModelCasts(phpContent: string): Record<string, string> {
   }
 
   return {};
+}
+
+/**
+ * Extract class-level `@property array{...} $field` object-shape docblocks from a model file,
+ * keyed by field name, with the raw shape string (`array{...}`) as the value — the caller runs
+ * it through `mapDocTypeToTs` to build the TS object literal. Only the `array{...}` object-shape
+ * form is read; a plain `@property array $field` or a simple `@property Type $field` contributes
+ * nothing. A leading `?` (`@property ?array{...}`) is accepted but dropped — nullability comes
+ * from the column/cast, not the property tag. `@property-read`/`@property-write` are read too.
+ */
+export function parseModelPropertyShapes(phpContent: string): Record<string, string> {
+  const shapes: Record<string, string> = {};
+  const tagRe = /@property(?:-read|-write)?\s+\??array\s*\{/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = tagRe.exec(phpContent)) !== null) {
+    const openBracePos = phpContent.indexOf('{', match.index);
+    if (openBracePos === -1) continue;
+
+    // Find the matching closing brace, respecting nested `array{...}` shapes.
+    let depth = 0;
+    let endPos = -1;
+    for (let pos = openBracePos; pos < phpContent.length; pos++) {
+      const ch = phpContent[pos];
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          endPos = pos;
+          break;
+        }
+      }
+    }
+    if (endPos === -1) continue;
+
+    // The field name is the `$var` following the closing brace on the same tag.
+    const after = phpContent.slice(endPos + 1);
+    const varMatch = after.match(/^[^\n$]*\$([A-Za-z_][A-Za-z0-9_]*)/);
+    if (varMatch) {
+      // Rebuild a single-line `array{...}` shape, stripping any multiline docblock asterisks.
+      const inside = phpContent
+        .slice(openBracePos + 1, endPos)
+        .replace(/^\s*\*\s?/gm, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      shapes[varMatch[1]] = `array{${inside}}`;
+    }
+
+    tagRe.lastIndex = endPos + 1;
+  }
+
+  return shapes;
 }
 
 /**
@@ -659,6 +711,14 @@ function resolveColumnField(prop: string, optional: boolean, options: ParseResou
         if (casts[prop]) {
           const cast = casts[prop];
           const trim = cast.trim();
+          // A plain array/json/collection cast the model documents with an `@property
+          // array{...}` object shape types as that shape, not the bare `any[]` default.
+          if (['array', 'json', 'collection'].includes(trim.toLowerCase())) {
+            const shape = parseModelPropertyShapes(modelContent)[prop];
+            if (shape) {
+              return { type: mapDocTypeToTs(shape), optional, column: prop };
+            }
+          }
           const tsType =
             trim.startsWith('{') || trim.includes(':') || /array\s*\{/.test(trim)
               ? trim

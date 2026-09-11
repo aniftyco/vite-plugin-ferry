@@ -270,7 +270,7 @@ describe('mergeResourceFields', () => {
 describe('buildResources', () => {
   it('falls a resource that cannot be analyzed back to a Record type with a warning', () => {
     const { resources, warnings } = buildResources(
-      [{ className: 'WeirdResource', model: 'Weird', staticFields: null, annotations: {}, enumNames: [] }],
+      [{ className: 'WeirdResource', model: 'Weird', staticFields: null, annotations: {}, propertyShapes: {}, enumNames: [] }],
       {},
       false
     );
@@ -281,7 +281,7 @@ describe('buildResources', () => {
 
   it('uses unknown as the fallback record under strict:true', () => {
     const { resources } = buildResources(
-      [{ className: 'WeirdResource', model: 'Weird', staticFields: null, annotations: {}, enumNames: [] }],
+      [{ className: 'WeirdResource', model: 'Weird', staticFields: null, annotations: {}, propertyShapes: {}, enumNames: [] }],
       {},
       true
     );
@@ -298,6 +298,7 @@ describe('buildResources', () => {
             model: 'Order',
             staticFields: { meta: { type: 'any', optional: false, undecidable: true } },
             annotations: {},
+            propertyShapes: {},
             enumNames: [],
           },
         ],
@@ -561,6 +562,43 @@ describe('array_merge(parent::toArray(), [...]) resolves inline keys (#20)', () 
 
   it('produces no "could not statically analyze" warning for the merged resource', () => {
     expect(warnings.some((w) => w.includes('MergedResource') && w.includes('could not statically analyze'))).toBe(false);
+  });
+});
+
+describe('@property array{...} shape refines an array cast (#21)', () => {
+  const inputs = collectResourceInputs({
+    resourcesDir: join(fixturesDir, 'Resources'),
+    modelsDir: join(fixturesDir, 'Models'),
+    enumsDir: join(fixturesDir, 'Enums'),
+    cwd: fixturesDir,
+  });
+
+  function profileFields(metadataDump: MetadataDump): Record<string, { type: string; optional: boolean }> {
+    const { resources } = buildResources(inputs, metadataDump, false, new Set(['OrderStatus']));
+    const entry = resources.ProfileResource;
+    expect(entry?.kind).toBe('shape');
+    return (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+  }
+
+  it('emits the documented object literal for the array cast, via the metadata dump', () => {
+    const f = profileFields(metadata);
+    // settings has a documented @property array{...} shape -> object literal, not any[].
+    expect(f.settings).toEqual({ type: '{ theme: string; notifications: boolean }', optional: false });
+    // tags is a plain array cast with no documented shape -> stays any[].
+    expect(f.tags).toEqual({ type: 'any[]', optional: false });
+  });
+
+  it('resolves the shape by the source attribute for a renamed field (output key != column)', () => {
+    // 'prefs' => $this->resource->settings — the shape is keyed by `settings`, not `prefs`,
+    // so the metadata path must key its refinement on the source column to find it.
+    const f = profileFields(metadata);
+    expect(f.prefs).toEqual({ type: '{ theme: string; notifications: boolean }', optional: false });
+  });
+
+  it('emits the documented object literal via the offline model-file path (no metadata)', () => {
+    const f = profileFields({});
+    expect(f.settings).toEqual({ type: '{ theme: string; notifications: boolean }', optional: false });
+    expect(f.tags).toEqual({ type: 'any[]', optional: false });
   });
 });
 

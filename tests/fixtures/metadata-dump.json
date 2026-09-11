@@ -53,5 +53,16 @@
         }
       }
     }
+  },
+  "Profile": {
+    "table": "profiles",
+    "columns": [
+      { "name": "settings", "type_name": "json", "nullable": false, "default": null },
+      { "name": "tags", "type_name": "json", "nullable": false, "default": null }
+    ],
+    "casts": {
+      "settings": "array",
+      "tags": "array"
+    }
   }
 }
