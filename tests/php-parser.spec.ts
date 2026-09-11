@@ -6,6 +6,7 @@ import {
   parseModelCasts,
   parseModelPropertyShapes,
   extractDocblockArrayShape,
+  extractExtendsShortName,
   extractMixinModel,
   parseResourceFieldsAst,
   resourceMergesParent,
@@ -559,6 +560,37 @@ describe('resourceMergesParent', () => {
       }
     `;
     expect(resourceMergesParent(php)).toBe(false);
+  });
+});
+
+describe('extractExtendsShortName', () => {
+  it('returns the parent short name, namespace stripped', () => {
+    const php = dedent`
+      <?php
+      namespace App\\Http\\Resources;
+      class AdminSessionResource extends \\App\\Http\\Resources\\SessionResource {}
+    `;
+    expect(extractExtendsShortName(php)).toBe('SessionResource');
+  });
+
+  it('returns the bare parent name when unqualified', () => {
+    const php = dedent`
+      <?php
+      class AdminSessionResource extends SessionResource {}
+    `;
+    expect(extractExtendsShortName(php)).toBe('SessionResource');
+  });
+
+  it('returns null when the class has no parent', () => {
+    const php = dedent`
+      <?php
+      class SessionResource {}
+    `;
+    expect(extractExtendsShortName(php)).toBeNull();
+  });
+
+  it('returns null on unparseable input', () => {
+    expect(extractExtendsShortName('not php')).toBeNull();
   });
 });
 

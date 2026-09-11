@@ -671,6 +671,99 @@ describe('array_merge(parent::toArray(), [...]) resolves the parent contribution
   });
 });
 
+describe('array_merge(parent::toArray(), [...]) inherits an app parent resource, not the model shape', () => {
+  const resourcesDir = join(fixturesDir, 'Resources');
+  const inputs = collectResourceInputs({
+    resourcesDir,
+    modelsDir: join(fixturesDir, 'Models'),
+    enumsDir: join(fixturesDir, 'Enums'),
+    cwd: fixturesDir,
+  });
+
+  // A Session model whose raw columns are exactly what the buggy v1.5.1 path would seed. The
+  // merge must NOT surface these — the parent RESOURCE emits the computed agent/location keys.
+  const withSession: MetadataDump = {
+    ...metadata,
+    Session: {
+      table: 'sessions',
+      columns: [
+        { name: 'id', type_name: 'varchar', nullable: false },
+        { name: 'payload', type_name: 'text', nullable: false },
+        { name: 'ip_address', type_name: 'varchar', nullable: true },
+        { name: 'last_activity', type_name: 'integer', nullable: false },
+      ],
+      casts: {},
+      appends: [],
+      hidden: [],
+      visible: [],
+    },
+  };
+
+  function fieldsOf(
+    name: string,
+    dump: MetadataDump = withSession
+  ): Record<string, { type: string; optional: boolean }> {
+    const { resources } = buildResources(inputs, dump, false, new Set(['OrderStatus']));
+    const entry = resources[name];
+    expect(entry?.kind).toBe('shape');
+    return (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+  }
+
+  it('inherits the parent resource computed keys plus the inline key', () => {
+    const f = fieldsOf('AdminSessionResource');
+    expect(f.agent).toEqual({ type: 'string', optional: false });
+    expect(f.location).toEqual({ type: 'string', optional: false });
+    expect(f.is_admin).toEqual({ type: 'boolean', optional: false });
+  });
+
+  it('does NOT invent the model raw columns the parent resource never emits', () => {
+    const f = fieldsOf('AdminSessionResource');
+    expect(f.payload).toBeUndefined();
+    expect(f.ip_address).toBeUndefined();
+    expect(f.last_activity).toBeUndefined();
+  });
+
+  it('resolves a multi-level chain and lets a child @ferry pin override an inherited key', () => {
+    const f = fieldsOf('SuperAdminSessionResource');
+    // Whole chain: SessionResource -> AdminSessionResource -> SuperAdminSessionResource.
+    expect(f.location).toEqual({ type: 'string', optional: false });
+    expect(f.is_admin).toEqual({ type: 'boolean', optional: false });
+    expect(f.level).toEqual({ type: 'string', optional: false });
+    // The child pin `@ferry agent number` overrides the parent's inherited string agent.
+    expect(f.agent).toEqual({ type: 'number', optional: false });
+    // Still no model columns anywhere in the chain.
+    expect(f.payload).toBeUndefined();
+  });
+
+  it('keeps the vendor-base @mixin case (MergedResource) on the model-shape path (no regression)', () => {
+    const f = fieldsOf('MergedResource');
+    // Account model columns still seeded — the parent is JsonResource, so the model shape wins.
+    expect(f.first_name).toEqual({ type: 'string', optional: false });
+    expect(f.full_name).toEqual({ type: 'string', optional: false });
+    expect(f.label).toEqual({ type: 'string', optional: false });
+  });
+
+  it('resolves a parent resource located in a SUBDIRECTORY, not the model shape', () => {
+    // Collection is recursive; the app-vs-vendor gate keys on the collected class, not a flat
+    // path — so a parent under Resources/Nested/ still counts as app-local.
+    const f = fieldsOf('NestedChildResource');
+    expect(f.agent).toEqual({ type: 'string', optional: false });
+    expect(f.location).toEqual({ type: 'string', optional: false });
+    expect(f.is_admin).toEqual({ type: 'boolean', optional: false });
+    // No phantom @mixin Session columns.
+    expect(f.payload).toBeUndefined();
+    expect(f.ip_address).toBeUndefined();
+  });
+
+  it('pushes a degrading ancestor field warning once, not once per descendant', () => {
+    const { warnings } = buildResources(inputs, withSession, false, new Set(['OrderStatus']));
+    // DegradingParentResource.blob degrades; DegradingChildResource extends and merges it. The
+    // ancestor resolves once (memoized), so its warning is emitted exactly once.
+    const blobWarnings = warnings.filter((w) => w.includes('DegradingParentResource.blob'));
+    expect(blobWarnings).toHaveLength(1);
+  });
+});
+
 describe('@property array{...} shape refines an array cast (#21)', () => {
   const inputs = collectResourceInputs({
     resourcesDir: join(fixturesDir, 'Resources'),

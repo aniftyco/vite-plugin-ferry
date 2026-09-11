@@ -7,6 +7,7 @@ import { logWarn } from '../utils/banner.js';
 import { getPhpFilesRecursive, readFileSafe } from '../utils/file.js';
 import {
   extractDocblockArrayShape,
+  extractExtendsShortName,
   extractFerryAnnotations,
   extractMixinModel,
   parseModelPropertyShapes,
@@ -92,6 +93,11 @@ export type ResourceInput = {
   /** True when `toArray()` is `array_merge(parent::toArray(...), [...])`: the merge seeds the
    * `@mixin` model's serialized shape before the inline keys, which then override it. */
   mergesParent?: boolean;
+  /** Short class name of the resource's `extends` parent, or undefined when it has none. When the
+   * parent resolves to an app-local Resource (a file in `resourcesDir`) and the resource merges
+   * the parent, the merge seeds THAT parent resource's resolved `toArray` fields — not the model
+   * shape. A vendor base (`JsonResource`) has no such file and keeps the model-shape seeding. */
+  parentResource?: string;
   /** Enum names collected while resolving static casts. */
   enumNames: string[];
 };
@@ -316,6 +322,12 @@ export type MergeResourceOptions = {
   /** Seed the `@mixin` model's serialized shape (columns − `$hidden`, plus `$appends`) before
    * the inline keys — the parent contribution of an `array_merge(parent::toArray(...), [...])`. */
   mergesParent?: boolean;
+  /** When the merged parent is an app-local Resource, its already-resolved `toArray` fields.
+   * Present (even when empty) means the app-resource branch: these are seeded before the inline
+   * keys INSTEAD of the model shape, so the child inherits the parent resource's computed keys
+   * rather than inventing model columns the parent never emits. Undefined keeps the model-shape
+   * path (a vendor base like `JsonResource`). */
+  parentFields?: Record<string, MergedField>;
   strict: boolean;
   /** The enum names ferry generates into `@ferry/enums`; a class cast is only treated as
    * an enum when its short name is in this set. */
@@ -418,20 +430,32 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
 
   const out: Record<string, MergedField> = {};
 
-  // Parent contribution of `array_merge(parent::toArray(...), [...])` on a `@mixin` model: the
-  // model's serialized shape — every column minus `$hidden` (typed by cast-or-column), plus each
-  // `$appends` accessor (typed by the model's scalar `@property` docblock). A `$visible`
-  // whitelist, when the model sets one, restricts serialization to just those attributes.
-  // Relations are excluded — only-when-loaded, not statically knowable. Seeded BEFORE the inline
-  // loop so inline keys override parent keys on collision (PHP array_merge, inline array last);
-  // a `@ferry` pin still wins over both. No `@mixin`/no metadata → skipped (inline keys only).
-  if (options.mergesParent && meta) {
-    const hidden = new Set(meta.hidden ?? []);
-    const visible = meta.visible ?? [];
+  // Parent contribution of `array_merge(parent::toArray(...), [...])` when the resource extends an
+  // app-local Resource: the parent resource's own resolved `toArray` shape (its computed keys, its
+  // pins, its own chain — already resolved through this same pipeline). Seeded BEFORE the inline
+  // loop so inline keys override on collision; the model shape is NOT consulted, so columns the
+  // parent resource never emits don't leak in. `parentFields` present (even empty) selects this
+  // path; empty means the parent file was missing/unreadable/cyclic — degrade to inline-only.
+  if (options.parentFields !== undefined) {
+    Object.assign(out, options.parentFields);
+  } else if (options.mergesParent && meta) {
+    seedModelShape();
+  }
+
+  // Model-shape seeding for the vendor-base case (`extends JsonResource` + `@mixin`): the model's
+  // serialized shape — every column minus `$hidden` (typed by cast-or-column), plus each
+  // `$appends` accessor (typed by the model's scalar `@property` docblock). A `$visible` whitelist,
+  // when the model sets one, restricts serialization to just those attributes. Relations are
+  // excluded — only-when-loaded, not statically knowable. Seeded BEFORE the inline loop so inline
+  // keys override parent keys on collision (PHP array_merge, inline array last); a `@ferry` pin
+  // still wins over both.
+  function seedModelShape(): void {
+    const hidden = new Set(meta!.hidden ?? []);
+    const visible = meta!.visible ?? [];
     const visibleSet = visible.length > 0 ? new Set(visible) : null;
     const serialized = (attr: string) => !hidden.has(attr) && (!visibleSet || visibleSet.has(attr));
 
-    for (const col of meta.columns) {
+    for (const col of meta!.columns) {
       if (!serialized(col.name)) continue;
       if (annotations[col.name] !== undefined) {
         out[col.name] = { type: annotations[col.name], optional: false };
@@ -445,7 +469,7 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
       out[col.name] = { type: refineArrayShape(leaf, col.name), optional: false };
     }
 
-    for (const append of meta.appends ?? []) {
+    for (const append of meta!.appends ?? []) {
       if (!serialized(append)) continue;
       if (annotations[append] !== undefined) {
         out[append] = { type: annotations[append], optional: false };
@@ -533,6 +557,15 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
     out[field] = { type: finalize(info.type, info, unionAddend), optional };
   }
 
+  // On the app-resource path, a child `@ferry` pin create-or-overrides a seeded parent key even
+  // when the child never names it inline — matching the shared-props side, where pins win over
+  // inherited fields. (The vendor model-shape path applies pins inline above; nothing to add.)
+  if (options.parentFields !== undefined) {
+    for (const [field, type] of Object.entries(annotations)) {
+      out[field] = { type, optional: out[field]?.optional ?? false };
+    }
+  }
+
   return out;
 }
 
@@ -553,6 +586,54 @@ export function buildResources(
   const warnings: string[] = [];
   const fallbackRecord = strict ? 'unknown' : 'any';
 
+  const byClassName = new Map<string, ResourceInput>();
+  for (const input of inputs) byClassName.set(input.className, input);
+
+  // Resolved fields memoized by class name, so an ancestor shared by several descendants resolves
+  // — and pushes any degrade warning — exactly once, not once per descendant plus standalone.
+  const cache = new Map<string, Record<string, MergedField>>();
+
+  // Resolve one resource's fields, following an app-local `extends` parent through this same merge
+  // so the parent's own `@mixin`/pins/`extends` chain resolve too. The parent is app-local iff it
+  // was collected into `byClassName` (collection is recursive and keyed by short name, so a parent
+  // in a subdirectory still matches); a vendor base like `JsonResource` is never collected, so it
+  // stays undefined → model-shape seeding. An app parent that's unanalyzable or cyclic yields `{}`
+  // — inline-only, but still off the model-shape path. `seen` guards cycles (A extends B extends A).
+  const resolveFields = (input: ResourceInput, seen: Set<string>): Record<string, MergedField> => {
+    const cached = cache.get(input.className);
+    if (cached) return cached;
+
+    let parentFields: Record<string, MergedField> | undefined;
+    if (input.mergesParent && input.parentResource && byClassName.has(input.parentResource)) {
+      const parent = byClassName.get(input.parentResource);
+      if (parent?.staticFields && !seen.has(input.parentResource)) {
+        seen.add(input.parentResource);
+        parentFields = resolveFields(parent, seen);
+      } else {
+        parentFields = {};
+      }
+    }
+
+    const fields = mergeResourceFields({
+      resourceName: input.className,
+      model: input.model,
+      staticFields: input.staticFields as Record<string, ResourceFieldInfo>,
+      metadata,
+      annotations: input.annotations,
+      propertyShapes: input.propertyShapes,
+      propertyTypes: input.propertyTypes,
+      mergesParent: input.mergesParent,
+      parentFields,
+      strict,
+      knownEnums,
+      enumNames,
+      warnings,
+    });
+
+    cache.set(input.className, fields);
+    return fields;
+  };
+
   for (const input of inputs) {
     for (const name of input.enumNames) enumNames.add(name);
 
@@ -564,22 +645,7 @@ export function buildResources(
       continue;
     }
 
-    const fields = mergeResourceFields({
-      resourceName: input.className,
-      model: input.model,
-      staticFields: input.staticFields,
-      metadata,
-      annotations: input.annotations,
-      propertyShapes: input.propertyShapes,
-      propertyTypes: input.propertyTypes,
-      mergesParent: input.mergesParent,
-      strict,
-      knownEnums,
-      enumNames,
-      warnings,
-    });
-
-    resources[input.className] = { kind: 'shape', fields };
+    resources[input.className] = { kind: 'shape', fields: resolveFields(input, new Set([input.className])) };
   }
 
   return { resources, enumNames, warnings };
@@ -771,6 +837,7 @@ export function collectResourceInputs(options: {
       // merges the parent (`array_merge(parent::toArray(...), [...])`).
       const propertyTypes = readModelPropertyTypes(modelsDir, model);
       const mergesParent = resourceMergesParent(content);
+      const parentResource = extractExtendsShortName(content) ?? undefined;
 
       const staticFields = parseResourceFieldsAst(content, {
         resourcesDir,
@@ -790,6 +857,7 @@ export function collectResourceInputs(options: {
         propertyShapes,
         propertyTypes,
         mergesParent,
+        parentResource,
         enumNames: Object.keys(collectedEnums),
       });
     } catch (e) {

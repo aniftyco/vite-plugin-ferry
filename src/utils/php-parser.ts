@@ -728,6 +728,25 @@ export function resourceMergesParent(phpContent: string): boolean {
 }
 
 /**
+ * The short class name of a resource's `extends` parent (`AdminSessionResource extends
+ * SessionResource` → `SessionResource`), namespace stripped. `null` when the class has no parent
+ * or can't be parsed. Lets the resource merge decide whether an
+ * `array_merge(parent::toArray(...), [...])` should seed the parent RESOURCE's resolved fields (an
+ * app-local parent resource) rather than the `@mixin` model's serialized shape (a vendor base like
+ * `JsonResource`).
+ */
+export function extractExtendsShortName(phpContent: string): string | null {
+  const ast = parsePhp(phpContent);
+  if (!ast) return null;
+
+  const classNode = findNodeByKind(ast, 'class') as PhpParserTypes.Class | null;
+  const parent = classNode?.extends;
+  if (!parent || parent.kind !== 'name') return null;
+
+  return (parent as PhpParserTypes.Name).name.replace(/^\\+/, '').split('\\').pop() ?? null;
+}
+
+/**
  * Map a PHP cast to a TypeScript type, potentially collecting enum references.
  */
 function mapCastToType(cast: string, enumsDir: string, collectedEnums: Record<string, EnumDefinition>): string {
