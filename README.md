@@ -84,6 +84,18 @@ route.isCurrent('users.show', { user: 1 });  // this route, this user
 route.isCurrent('users.*');                  // any users.* route active (nav highlighting)
 ```
 
+Laravel scoped bindings are supported — call the route with the binding name (the part before the colon), not the field:
+
+```php
+// routes/web.php
+Route::get('posts/{post:slug}/edit', [PostController::class, 'edit'])->scopeBindings()->name('post.edit');
+```
+
+```tsx
+route('post.edit', { post: 'hello-world' });            // '/posts/hello-world/edit'
+route.isCurrent('post.edit', { post: 'hello-world' });  // true on /posts/hello-world/edit
+```
+
 Only the patterns for routes actually referenced in your code ever reach the browser — the full route table never ships.
 
 ### Enums — `@ferry/enum`, `@ferry/enums`
