@@ -8,6 +8,7 @@ import {
   extractDocblockArrayShape,
   extractMixinModel,
   parseResourceFieldsAst,
+  resourceMergesParent,
 } from '../src/utils/php-parser.js';
 import { dedent } from './utils.js';
 
@@ -475,6 +476,89 @@ describe('parseResourceFieldsAst', () => {
   it('returns null for class without toArray method', () => {
     const result = parseResourceFieldsAst('<?php class Foo { public function bar() {} }');
     expect(result).toBeNull();
+  });
+});
+
+describe('resourceMergesParent', () => {
+  it('is true when toArray returns array_merge(parent::toArray(...), [...])', () => {
+    const php = dedent`
+      <?php
+      class R {
+        public function toArray($request): array {
+          return array_merge(parent::toArray($request), ['id' => $this->id]);
+        }
+      }
+    `;
+    expect(resourceMergesParent(php)).toBe(true);
+  });
+
+  it('is false when parent::toArray() is computed but not returned in the merge', () => {
+    // parent::toArray() runs, but the RETURN is a plain inline array — no parent contribution.
+    const php = dedent`
+      <?php
+      class R {
+        public function toArray($request): array {
+          $base = parent::toArray($request);
+          return ['id' => $this->id, 'count' => count($base)];
+        }
+      }
+    `;
+    expect(resourceMergesParent(php)).toBe(false);
+  });
+
+  it('is false for a plain inline-array toArray', () => {
+    const php = dedent`
+      <?php
+      class R {
+        public function toArray($request): array {
+          return ['id' => $this->id];
+        }
+      }
+    `;
+    expect(resourceMergesParent(php)).toBe(false);
+  });
+
+  it('is true when an early guard return precedes the merge return', () => {
+    // The merge is the second return; scanning only the first would drop the contribution.
+    const php = dedent`
+      <?php
+      class R {
+        public function toArray($request): array {
+          if ($this->hidden) { return []; }
+          return array_merge(parent::toArray($request), ['id' => $this->id]);
+        }
+      }
+    `;
+    expect(resourceMergesParent(php)).toBe(true);
+  });
+
+  it('is false when the merge is inside a nested closure, not the method return', () => {
+    // The method returns a bare inline array; the array_merge(parent::toArray()) lives in a
+    // closure it builds a value from, so it is not the method's own return.
+    const php = dedent`
+      <?php
+      class R {
+        public function toArray($request): array {
+          $build = fn () => array_merge(parent::toArray($request), ['x' => 1]);
+          return ['id' => $this->id, 'built' => $build()];
+        }
+      }
+    `;
+    expect(resourceMergesParent(php)).toBe(false);
+  });
+
+  it('is false when parent::toArray is not the first merge argument', () => {
+    // Parent last -> PHP makes the parent win the collision; our seed-then-override order
+    // would mis-type it, so we decline (parent-arg-last is a non-goal).
+    const php = dedent`
+      <?php
+      class R {
+        public function toArray($request): array {
+          return array_merge(['id' => $this->id], parent::toArray($request));
+        }
+      }
+    `;
+    expect(resourceMergesParent(php)).toBe(false);
   });
 });
 

@@ -2,21 +2,23 @@ import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, parse, relative } from 'node:path';
 import type { Delivery } from '../delivery/index.js';
+import { runArtisan } from '../utils/artisan.js';
+import { logWarn } from '../utils/banner.js';
 import { getPhpFilesRecursive, readFileSafe } from '../utils/file.js';
 import {
   extractDocblockArrayShape,
   extractFerryAnnotations,
   extractMixinModel,
   parseModelPropertyShapes,
+  parseModelPropertyTypes,
   parseResourceFieldsAst,
+  resourceMergesParent,
   type EnumDefinition,
   type ResourceFieldInfo,
 } from '../utils/php-parser.js';
 import { renderKey } from '../utils/ts-keys.js';
 import { mapDocTypeToTs, mapPhpTypeToTs } from '../utils/type-mapper.js';
 import { collectEnums } from './enums.js';
-import { runArtisan } from '../utils/artisan.js';
-import { logWarn } from '../utils/banner.js';
 
 /** The ferry virtual/type module id resources are delivered under. */
 export const RESOURCES_MODULE_ID = '@ferry/resources';
@@ -49,6 +51,13 @@ export type ModelMeta = {
   columns: ColumnMeta[];
   casts: Record<string, string>;
   relations?: Record<string, RelatedMeta>;
+  /** `$appends` accessor names — serialized in addition to the columns. Typed via the model's
+   * scalar `@property` docblock. Absent in older/stale dumps; treated as empty then. */
+  appends?: string[];
+  /** `$hidden` attribute names — excluded from the serialized shape. Absent → empty. */
+  hidden?: string[];
+  /** `$visible` whitelist. When non-empty, ONLY these attributes serialize. Absent → empty. */
+  visible?: string[];
 };
 
 /** The metadata dump, keyed by model class short name (`Order`, `User`). */
@@ -77,6 +86,12 @@ export type ResourceInput = {
   /** Class-level `@property array{...} $field` object shapes on the backing model, mapped to
    * TS object literals. Each refines an array/json/collection field's bare `any[]` default. */
   propertyShapes: Record<string, string>;
+  /** Scalar `@property`/`@property-read` types on the backing model (mapped to TS), keyed by
+   * name. Types the model's `$appends` accessors when the resource merges the parent. */
+  propertyTypes?: Record<string, string>;
+  /** True when `toArray()` is `array_merge(parent::toArray(...), [...])`: the merge seeds the
+   * `@mixin` model's serialized shape before the inline keys, which then override it. */
+  mergesParent?: boolean;
   /** Enum names collected while resolving static casts. */
   enumNames: string[];
 };
@@ -135,6 +150,12 @@ function parseColumns(raw: unknown): ColumnMeta[] {
     }));
 }
 
+/** Normalize a raw value into a string array, dropping non-string members. */
+function parseStringArray(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((v): v is string => typeof v === 'string');
+}
+
 function parseCasts(raw: unknown): Record<string, string> {
   const casts: Record<string, string> = {};
   if (raw && typeof raw === 'object') {
@@ -166,6 +187,9 @@ export function parseMetadataDump(raw: unknown): MetadataDump {
       columns: parseColumns(value.columns),
       casts: parseCasts(value.casts),
       ...(relations ? { relations } : {}),
+      appends: parseStringArray(value.appends),
+      hidden: parseStringArray(value.hidden),
+      visible: parseStringArray(value.visible),
     };
   }
 
@@ -218,7 +242,10 @@ export function resolveCast(
 
   // Class-name cast: `App\Enums\OrderStatus`, `AsCollection::class` -> `AsCollection`, etc.
   if ((raw.includes('\\') || /^[A-Z][A-Za-z0-9_]*$/.test(raw)) && !PRIMITIVE_CASTS.has(low)) {
-    const short = raw.split('\\').pop()!.replace(/::class$/, '');
+    const short = raw
+      .split('\\')
+      .pop()!
+      .replace(/::class$/, '');
     if (knownEnums.has(short)) {
       // Resource data arrives as the enum's raw backing value over JSON, not an instance,
       // so the field types as the generated `<Enum>Value` union rather than the Enum class.
@@ -251,7 +278,10 @@ export function resolveCast(
  * becomes `string` and `string | null | string` becomes `string | null`, order-independent.
  */
 export function normalizeUnion(type: string): string {
-  const members = type.split('|').map((m) => m.trim()).filter(Boolean);
+  const members = type
+    .split('|')
+    .map((m) => m.trim())
+    .filter(Boolean);
   const seen = new Set<string>();
   const out: string[] = [];
   let hasNull = false;
@@ -280,6 +310,12 @@ export type MergeResourceOptions = {
   /** Backing-model `@property array{...}` object shapes (TS literals), keyed by field. Each
    * refines the bare `any[]` an array/json/collection cast (or a json column) resolves to. */
   propertyShapes?: Record<string, string>;
+  /** Backing-model scalar `@property` types (mapped to TS), keyed by name. Types the model's
+   * `$appends` accessors when `mergesParent` is set. */
+  propertyTypes?: Record<string, string>;
+  /** Seed the `@mixin` model's serialized shape (columns − `$hidden`, plus `$appends`) before
+   * the inline keys — the parent contribution of an `array_merge(parent::toArray(...), [...])`. */
+  mergesParent?: boolean;
   strict: boolean;
   /** The enum names ferry generates into `@ferry/enums`; a class cast is only treated as
    * an enum when its short name is in this set. */
@@ -305,6 +341,7 @@ export type MergeResourceOptions = {
 export function mergeResourceFields(options: MergeResourceOptions): Record<string, MergedField> {
   const { resourceName, model, staticFields, metadata, annotations, strict, knownEnums, enumNames, warnings } = options;
   const propertyShapes = options.propertyShapes ?? {};
+  const propertyTypes = options.propertyTypes ?? {};
 
   const meta = metadata[model];
   const columns = new Map<string, ColumnMeta>((meta?.columns ?? []).map((c) => [c.name, c]));
@@ -380,6 +417,45 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
   };
 
   const out: Record<string, MergedField> = {};
+
+  // Parent contribution of `array_merge(parent::toArray(...), [...])` on a `@mixin` model: the
+  // model's serialized shape — every column minus `$hidden` (typed by cast-or-column), plus each
+  // `$appends` accessor (typed by the model's scalar `@property` docblock). A `$visible`
+  // whitelist, when the model sets one, restricts serialization to just those attributes.
+  // Relations are excluded — only-when-loaded, not statically knowable. Seeded BEFORE the inline
+  // loop so inline keys override parent keys on collision (PHP array_merge, inline array last);
+  // a `@ferry` pin still wins over both. No `@mixin`/no metadata → skipped (inline keys only).
+  if (options.mergesParent && meta) {
+    const hidden = new Set(meta.hidden ?? []);
+    const visible = meta.visible ?? [];
+    const visibleSet = visible.length > 0 ? new Set(visible) : null;
+    const serialized = (attr: string) => !hidden.has(attr) && (!visibleSet || visibleSet.has(attr));
+
+    for (const col of meta.columns) {
+      if (!serialized(col.name)) continue;
+      if (annotations[col.name] !== undefined) {
+        out[col.name] = { type: annotations[col.name], optional: false };
+        continue;
+      }
+      const leaf = resolveLeaf(col.name);
+      if (leaf === 'unresolved' || leaf === null) {
+        out[col.name] = degrade(col.name, false);
+        continue;
+      }
+      out[col.name] = { type: refineArrayShape(leaf, col.name), optional: false };
+    }
+
+    for (const append of meta.appends ?? []) {
+      if (!serialized(append)) continue;
+      if (annotations[append] !== undefined) {
+        out[append] = { type: annotations[append], optional: false };
+        continue;
+      }
+      const documented = propertyTypes[append];
+      // An undocumented append can't be typed — degrade with the same warning pattern.
+      out[append] = documented ? { type: documented, optional: false } : degrade(append, false);
+    }
+  }
 
   for (const [field, info] of Object.entries(staticFields)) {
     const optional = info.optional;
@@ -495,6 +571,8 @@ export function buildResources(
       metadata,
       annotations: input.annotations,
       propertyShapes: input.propertyShapes,
+      propertyTypes: input.propertyTypes,
+      mergesParent: input.mergesParent,
       strict,
       knownEnums,
       enumNames,
@@ -603,6 +681,26 @@ function readModelPropertyShapes(modelsDir: string, model: string): Record<strin
   return mapped;
 }
 
+/**
+ * Read the backing model's scalar `@property`/`@property-read` types and map each to a TS type,
+ * keyed by name. Used to type the model's `$appends` accessors when a resource merges the
+ * parent. Empty when the model file is absent or documents no scalar properties.
+ */
+function readModelPropertyTypes(modelsDir: string, model: string): Record<string, string> {
+  if (!modelsDir || !model) return {};
+  const modelPath = join(modelsDir, `${model}.php`);
+  if (!existsSync(modelPath)) return {};
+  const content = readFileSafe(modelPath);
+  if (!content) return {};
+
+  const types = parseModelPropertyTypes(content);
+  const mapped: Record<string, string> = {};
+  for (const [name, docType] of Object.entries(types)) {
+    mapped[name] = mapDocTypeToTs(docType);
+  }
+  return mapped;
+}
+
 /** Map a docblock array shape's field types to TypeScript. */
 function mapDocShape(docShape: Record<string, string>): Record<string, string> {
   const result: Record<string, string> = {};
@@ -669,6 +767,11 @@ export function collectResourceInputs(options: {
       // array/json/collection cast's bare `any[]` into the documented object literal.
       const propertyShapes = readModelPropertyShapes(modelsDir, model);
 
+      // Scalar `@property` types on the model type its `$appends` accessors when the resource
+      // merges the parent (`array_merge(parent::toArray(...), [...])`).
+      const propertyTypes = readModelPropertyTypes(modelsDir, model);
+      const mergesParent = resourceMergesParent(content);
+
       const staticFields = parseResourceFieldsAst(content, {
         resourcesDir,
         modelsDir,
@@ -685,6 +788,8 @@ export function collectResourceInputs(options: {
         staticFields,
         annotations: extractFerryAnnotations(content),
         propertyShapes,
+        propertyTypes,
+        mergesParent,
         enumNames: Object.keys(collectedEnums),
       });
     } catch (e) {
@@ -743,6 +848,9 @@ function buildDumpScript(modelClasses: string[], relationsByModel: Record<string
     "            'columns' => \\Illuminate\\Support\\Facades\\Schema::getColumns($ferryTable),",
     "            'casts' => $ferryModel->getCasts(),",
     "            'relations' => $ferryRelOut,",
+    "            'appends' => $ferryModel->getAppends(),",
+    "            'hidden' => $ferryModel->getHidden(),",
+    "            'visible' => $ferryModel->getVisible(),",
     '        ];',
     '    } catch (\\Throwable $ferryErr) { continue; }',
     '}',
@@ -772,7 +880,10 @@ export function dumpMetadata(
 ): MetadataDump {
   if (models.length === 0) return {};
 
-  const script = buildDumpScript(models.map((m) => `App\\Models\\${m}`), relationsByModel);
+  const script = buildDumpScript(
+    models.map((m) => `App\\Models\\${m}`),
+    relationsByModel
+  );
   const tmpFile = join(tmpdir(), `ferry-metadata-${process.pid}-${Date.now()}.php`);
 
   try {
@@ -807,7 +918,13 @@ export function dumpMetadata(
  * generation pass and on resource/model changes in dev. Does not write the ambient file;
  * the caller runs `writeTypes()`.
  */
-export function registerResources({ resourcesDir, modelsDir, cwd, delivery, strict = false }: ResourceRegisterOptions): void {
+export function registerResources({
+  resourcesDir,
+  modelsDir,
+  cwd,
+  delivery,
+  strict = false,
+}: ResourceRegisterOptions): void {
   const enumsDir = join(cwd, 'app/Enums');
 
   const inputs = collectResourceInputs({ resourcesDir, modelsDir, enumsDir, cwd, strict });

@@ -1,9 +1,12 @@
+import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRequire } from 'node:module';
-import { spawnSync } from 'node:child_process';
 import { describe, it, expect, vi } from 'vitest';
+import { assembleAmbientTypes } from '../src/delivery/ambient-types.js';
+import { ENUM_BASE_DTS } from '../src/delivery/enum-base.js';
+import { generateEnumsDts } from '../src/generators/enums.js';
 import {
   RESOURCE_RUNTIME,
   parseMetadataDump,
@@ -17,10 +20,7 @@ import {
   type MetadataDump,
   type ResourceEntry,
 } from '../src/generators/resources.js';
-import { generateEnumsDts } from '../src/generators/enums.js';
 import { generateRoutesDts, type RouteTable } from '../src/generators/routes.js';
-import { assembleAmbientTypes } from '../src/delivery/ambient-types.js';
-import { ENUM_BASE_DTS } from '../src/delivery/enum-base.js';
 import type { EnumDefinition, ResourceFieldInfo } from '../src/utils/php-parser.js';
 import { extractFerryAnnotations } from '../src/utils/php-parser.js';
 import { dedent } from './utils.js';
@@ -73,7 +73,10 @@ describe('resolveCast', () => {
   const knownEnums = new Set(['OrderStatus']);
 
   it('maps a known ferry enum cast (FQCN or short) to its backing-value type and reports the enum name', () => {
-    expect(resolveCast('App\\Enums\\OrderStatus', knownEnums)).toEqual({ type: 'OrderStatusValue', enum: 'OrderStatus' });
+    expect(resolveCast('App\\Enums\\OrderStatus', knownEnums)).toEqual({
+      type: 'OrderStatusValue',
+      enum: 'OrderStatus',
+    });
     expect(resolveCast('OrderStatus', knownEnums)).toEqual({ type: 'OrderStatusValue', enum: 'OrderStatus' });
   });
 
@@ -270,7 +273,16 @@ describe('mergeResourceFields', () => {
 describe('buildResources', () => {
   it('falls a resource that cannot be analyzed back to a Record type with a warning', () => {
     const { resources, warnings } = buildResources(
-      [{ className: 'WeirdResource', model: 'Weird', staticFields: null, annotations: {}, propertyShapes: {}, enumNames: [] }],
+      [
+        {
+          className: 'WeirdResource',
+          model: 'Weird',
+          staticFields: null,
+          annotations: {},
+          propertyShapes: {},
+          enumNames: [],
+        },
+      ],
       {},
       false
     );
@@ -281,7 +293,16 @@ describe('buildResources', () => {
 
   it('uses unknown as the fallback record under strict:true', () => {
     const { resources } = buildResources(
-      [{ className: 'WeirdResource', model: 'Weird', staticFields: null, annotations: {}, propertyShapes: {}, enumNames: [] }],
+      [
+        {
+          className: 'WeirdResource',
+          model: 'Weird',
+          staticFields: null,
+          annotations: {},
+          propertyShapes: {},
+          enumNames: [],
+        },
+      ],
       {},
       true
     );
@@ -324,7 +345,8 @@ describe('generateResourcesDtsBlock', () => {
 
     const block = generateResourcesDtsBlock(resources, new Set(['OrderStatus']));
 
-    expect(block).toBe(dedent`
+    expect(block).toBe(
+      dedent`
       declare module '@ferry/resources' {
         import { OrderStatusValue } from '@ferry/enums';
 
@@ -334,7 +356,8 @@ describe('generateResourcesDtsBlock', () => {
           author?: UserResource;
         };
       }
-    `.trimEnd());
+    `.trimEnd()
+    );
 
     // The old, wrong namespace must be gone.
     expect(block).not.toContain('@app/enums');
@@ -535,7 +558,7 @@ describe('resolved property forms (static shape + metadata merge)', () => {
   });
 });
 
-describe('array_merge(parent::toArray(), [...]) resolves inline keys (#20)', () => {
+describe('array_merge(parent::toArray(), [...]) resolves the parent contribution + inline keys (#20)', () => {
   const inputs = collectResourceInputs({
     resourcesDir: join(fixturesDir, 'Resources'),
     modelsDir: join(fixturesDir, 'Models'),
@@ -544,10 +567,14 @@ describe('array_merge(parent::toArray(), [...]) resolves inline keys (#20)', () 
   });
   const { resources, warnings } = buildResources(inputs, metadata, false, new Set(['OrderStatus']));
 
-  it('types the inline literal keys instead of bailing to Record<string, any>', () => {
+  function mergedFields(): Record<string, { type: string; optional: boolean }> {
     const entry = resources.MergedResource;
     expect(entry?.kind).toBe('shape');
-    const f = (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+    return (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+  }
+
+  it('types the inline literal keys instead of bailing to Record<string, any>', () => {
+    const f = mergedFields();
 
     // Model-backed inline keys resolve through metadata; a literal resolves statically.
     expect(f.id).toEqual({ type: 'number', optional: false });
@@ -555,13 +582,92 @@ describe('array_merge(parent::toArray(), [...]) resolves inline keys (#20)', () 
     expect(f.label).toEqual({ type: 'string', optional: false });
   });
 
+  it('seeds the parent contribution: model columns (minus $hidden) typed via metadata', () => {
+    const f = mergedFields();
+
+    // Columns the resource never names inline still surface, typed by cast-or-column.
+    expect(f.first_name).toEqual({ type: 'string', optional: false });
+    expect(f.last_name).toEqual({ type: 'string', optional: false });
+    expect(f.score).toEqual({ type: 'number', optional: false }); // integer cast
+    expect(f.joined_at).toEqual({ type: 'string', optional: false }); // datetime -> string
+
+    // $hidden attributes are excluded from the parent contribution.
+    expect(f.deleted_at).toBeUndefined();
+  });
+
+  it('seeds $appends accessors typed by the model scalar @property docblock', () => {
+    const f = mergedFields();
+    // getFullNameAttribute() is appended and documented `@property-read string $full_name`.
+    expect(f.full_name).toEqual({ type: 'string', optional: false });
+  });
+
+  it('lets an inline key override a colliding parent column', () => {
+    const f = mergedFields();
+    // Parent `phone` column is nullable (string | null); the inline `'phone' => 'hidden'`
+    // literal wins on collision, so the field is a bare string.
+    expect(f.phone).toEqual({ type: 'string', optional: false });
+  });
+
   it('applies a per-field @ferry pin on the merged resource', () => {
-    const f = (resources.MergedResource as Extract<ResourceEntry, { kind: 'shape' }>).fields;
-    expect(f.meta).toEqual({ type: 'Record<string, string>', optional: false });
+    expect(mergedFields().meta).toEqual({ type: 'Record<string, string>', optional: false });
   });
 
   it('produces no "could not statically analyze" warning for the merged resource', () => {
-    expect(warnings.some((w) => w.includes('MergedResource') && w.includes('could not statically analyze'))).toBe(false);
+    expect(warnings.some((w) => w.includes('MergedResource') && w.includes('could not statically analyze'))).toBe(
+      false
+    );
+  });
+
+  it('degrades an undocumented append and warns', () => {
+    // A dump advertising an append the model does not document with a scalar @property.
+    const dump: MetadataDump = {
+      ...metadata,
+      Account: { ...metadata.Account, appends: [...(metadata.Account.appends ?? []), 'mystery'] },
+    };
+    const { resources: r, warnings: w } = buildResources(inputs, dump, false, new Set(['OrderStatus']));
+    const f = (r.MergedResource as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+
+    expect(f.mystery).toEqual({ type: 'any', optional: false });
+    expect(w.some((warning) => warning.includes('MergedResource.mystery'))).toBe(true);
+  });
+
+  it('restricts the parent contribution to a non-empty $visible whitelist', () => {
+    // $visible names only id/name/score; other columns are excluded even though not hidden.
+    const dump: MetadataDump = {
+      ...metadata,
+      Account: { ...metadata.Account, visible: ['id', 'name', 'score', 'full_name'] },
+    };
+    const { resources: r } = buildResources(inputs, dump, false, new Set(['OrderStatus']));
+    const f = (r.MergedResource as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+
+    // Whitelisted parent columns + append are seeded.
+    expect(f.score).toEqual({ type: 'number', optional: false });
+    expect(f.full_name).toEqual({ type: 'string', optional: false });
+    // Non-whitelisted columns are excluded from the parent contribution.
+    expect(f.first_name).toBeUndefined();
+    expect(f.last_name).toBeUndefined();
+    expect(f.joined_at).toBeUndefined();
+    // Inline keys are unaffected by $visible — they always appear.
+    expect(f.label).toEqual({ type: 'string', optional: false });
+    expect(f.phone).toEqual({ type: 'string', optional: false });
+  });
+
+  it('seeds all non-hidden columns when $visible is empty (no whitelist)', () => {
+    // The base MergedResource/Account case: empty visible -> every non-hidden column appears.
+    const f = mergedFields();
+    expect(f.first_name).toEqual({ type: 'string', optional: false });
+    expect(f.last_name).toEqual({ type: 'string', optional: false });
+    expect(f.joined_at).toEqual({ type: 'string', optional: false });
+    expect(f.deleted_at).toBeUndefined(); // still excluded by $hidden
+  });
+
+  it('falls back to inline keys only when the merged resource has no model metadata', () => {
+    // No metadata for Account -> no parent contribution, no crash; inline keys still resolve.
+    const { resources: r } = buildResources(inputs, {}, false, new Set(['OrderStatus']));
+    const f = (r.MergedResource as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+
+    expect(f.label).toEqual({ type: 'string', optional: false });
+    expect(f.first_name).toBeUndefined(); // parent columns need metadata to surface
   });
 });
 
@@ -661,7 +767,9 @@ describe('collectResourceInputs (recursion + duplicate short names)', () => {
     mkdirSync(join(resourcesDir, 'Admin'), { recursive: true });
     writeFileSync(join(resourcesDir, 'Admin', 'UserResource.php'), minimalResource('UserResource'), 'utf8');
 
-    expect(() => collectResourceInputs(opts(dir, resourcesDir, true))).toThrow(/Duplicate resource class name 'UserResource'/);
+    expect(() => collectResourceInputs(opts(dir, resourcesDir, true))).toThrow(
+      /Duplicate resource class name 'UserResource'/
+    );
   });
 });
 

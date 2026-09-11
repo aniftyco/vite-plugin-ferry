@@ -17,6 +17,7 @@ class MergedResource extends JsonResource
         return array_merge(parent::toArray($request), [
             'id' => $this->id,
             'name' => $this->resource->name,
+            'phone' => 'hidden',
             'meta' => $this->meta,
             'label' => 'active',
         ]);

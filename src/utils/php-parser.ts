@@ -368,6 +368,29 @@ export function parseModelPropertyShapes(phpContent: string): Record<string, str
 }
 
 /**
+ * Read scalar `@property`/`@property-read`/`@property-write <type> $name` docblock types from a
+ * model file, keyed by property name, with the raw doc type as the value — the caller maps it
+ * through `mapDocTypeToTs`. Used to type a `@mixin` model's `$appends` accessors. The
+ * `array{...}` object-shape form is `parseModelPropertyShapes`' job, so an `array{...}` type is
+ * skipped here to keep the two readers from disagreeing. First tag wins on a duplicate name.
+ */
+export function parseModelPropertyTypes(phpContent: string): Record<string, string> {
+  const types: Record<string, string> = {};
+  const re = /@property(?:-read|-write)?\s+(\S+)\s+\$([A-Za-z_][A-Za-z0-9_]*)/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(phpContent)) !== null) {
+    const rawType = match[1];
+    const name = match[2];
+    // The object-shape form is handled by parseModelPropertyShapes; skip it here.
+    if (/^\??array\s*\{/.test(rawType)) continue;
+    if (types[name] === undefined) types[name] = rawType;
+  }
+
+  return types;
+}
+
+/**
  * Extract docblock array shape from PHP content.
  * This is a pure function that takes PHP source code as input.
  */
@@ -639,6 +662,69 @@ export function extractMixinModel(phpContent: string): string | null {
   if (!match) return null;
   const short = match[1].replace(/^\\+/, '').split('\\').pop();
   return short || null;
+}
+
+/**
+ * Collect the `return` statements that belong to a method's OWN body, not descending into
+ * nested `closure`/`arrowfunc` nodes — a `return` inside a closure is that closure's return,
+ * not the method's. Used to read what `toArray()` itself returns.
+ */
+function collectOwnReturns(node: PhpParserTypes.Node, out: PhpParserTypes.Return[]): void {
+  if (node.kind === 'closure' || node.kind === 'arrowfunc') return;
+  if (node.kind === 'return') out.push(node as PhpParserTypes.Return);
+  walkChildren(node, (child) => {
+    collectOwnReturns(child, out);
+    return false;
+  });
+}
+
+/** Whether a node is a `parent::toArray(...)` call. */
+function isParentToArrayCall(node: PhpParserTypes.Node | undefined): boolean {
+  if (!node || node.kind !== 'call') return false;
+  const what = (node as PhpParserTypes.Call).what as any;
+  return (
+    what?.kind === 'staticlookup' &&
+    what.what?.kind === 'parentreference' &&
+    (what.offset?.kind === 'identifier' ? what.offset.name : null) === 'toArray'
+  );
+}
+
+/**
+ * Whether the resource's `toArray()` merges the parent's contribution — some `return` in the
+ * method returns a call whose FIRST argument is `parent::toArray(...)` (the
+ * `array_merge(parent::toArray(...), [...inline...])` idiom). When set, the merge seeds the
+ * `@mixin` model's serialized shape (columns − `$hidden`, plus `$appends`) before the inline
+ * keys, which then override it on collision.
+ *
+ * Every top-level `return` is scanned (not just the first) so an early guard return before the
+ * merge doesn't hide it; nested closures/arrow functions are NOT descended into, so a `return`
+ * inside a closure the method builds its value from isn't mistaken for the method's own return.
+ * The parent call is required as the FIRST merge argument: only that ordering gives inline-wins
+ * precedence — parent-arg-last (where PHP makes the parent win) is a documented non-goal, so we
+ * decline to seed rather than mis-type its collisions.
+ */
+export function resourceMergesParent(phpContent: string): boolean {
+  const ast = parsePhp(phpContent);
+  if (!ast) return false;
+
+  const classNode = findNodeByKind(ast, 'class') as PhpParserTypes.Class | null;
+  if (!classNode) return false;
+
+  const methods = findAllNodesByKind(classNode, 'method') as PhpParserTypes.Method[];
+  const toArrayMethod = methods.find((m) => {
+    const name = typeof m.name === 'string' ? m.name : (m.name as PhpParserTypes.Identifier).name;
+    return name === 'toArray';
+  });
+  if (!toArrayMethod?.body) return false;
+
+  const returns: PhpParserTypes.Return[] = [];
+  collectOwnReturns(toArrayMethod.body, returns);
+  return returns.some((ret) => {
+    const expr = ret.expr;
+    if (expr?.kind !== 'call') return false;
+    const args = ((expr as PhpParserTypes.Call).arguments ?? []) as PhpParserTypes.Node[];
+    return isParentToArrayCall(args[0]);
+  });
 }
 
 /**

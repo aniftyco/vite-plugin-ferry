@@ -39,6 +39,8 @@
       "joined_at": "datetime",
       "deleted_at": "datetime"
     },
+    "appends": ["full_name"],
+    "hidden": ["deleted_at"],
     "relations": {
       "author": {
         "columns": [
