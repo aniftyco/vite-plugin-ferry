@@ -20,5 +20,24 @@
       "payload": "Illuminate\\Database\\Eloquent\\Casts\\AsCollection",
       "is_gift": "boolean"
     }
+  },
+  "Account": {
+    "table": "accounts",
+    "columns": [
+      { "name": "id", "type_name": "bigint", "nullable": false, "default": null },
+      { "name": "name", "type_name": "varchar", "nullable": false, "default": null },
+      { "name": "first_name", "type_name": "varchar", "nullable": false, "default": null },
+      { "name": "last_name", "type_name": "varchar", "nullable": false, "default": null },
+      { "name": "phone", "type_name": "varchar", "nullable": true, "default": null },
+      { "name": "score", "type_name": "integer", "nullable": false, "default": null },
+      { "name": "joined_at", "type_name": "datetime", "nullable": false, "default": null },
+      { "name": "deleted_at", "type_name": "datetime", "nullable": true, "default": null }
+    ],
+    "casts": {
+      "id": "integer",
+      "score": "integer",
+      "joined_at": "datetime",
+      "deleted_at": "datetime"
+    }
   }
 }

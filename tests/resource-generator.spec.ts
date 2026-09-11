@@ -10,6 +10,7 @@ import {
   mapColumnType,
   resolveCast,
   mergeResourceFields,
+  normalizeUnion,
   buildResources,
   generateResourcesDtsBlock,
   collectResourceInputs,
@@ -97,6 +98,16 @@ describe('resolveCast', () => {
     expect(resolveCast('datetime')).toEqual({ type: 'string' });
     expect(resolveCast('array')).toEqual({ type: 'any[]' });
     expect(resolveCast('hashed')).toEqual({ type: 'string' });
+  });
+});
+
+describe('normalizeUnion', () => {
+  it('dedupes members and collapses null into a single trailing member, order-independent', () => {
+    expect(normalizeUnion('string | string')).toBe('string');
+    expect(normalizeUnion('string | null | string')).toBe('string | null');
+    expect(normalizeUnion('string | string | null')).toBe('string | null');
+    expect(normalizeUnion('number | string')).toBe('number | string');
+    expect(normalizeUnion('null | string | null')).toBe('string | null');
   });
 });
 
@@ -403,6 +414,102 @@ describe('static analysis of the resource fixtures', () => {
   });
 });
 
+describe('resolved property forms (static shape + metadata merge)', () => {
+  const inputs = collectResourceInputs({
+    resourcesDir: join(fixturesDir, 'Resources'),
+    modelsDir: join(fixturesDir, 'Models'),
+    enumsDir: join(fixturesDir, 'Enums'),
+    cwd: fixturesDir,
+  });
+  const { resources } = buildResources(inputs, metadata, false, new Set(['OrderStatus']));
+
+  function fieldsOf(name: string): Record<string, { type: string; optional: boolean }> {
+    const entry = resources[name];
+    expect(entry?.kind).toBe('shape');
+    return (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+  }
+
+  it('resolves attribute, conditional and literal forms off the @mixin model', () => {
+    const f = fieldsOf('AttributeResource');
+
+    // Bare $this->prop and $this->resource->prop -> the model column/cast type.
+    expect(f.id).toEqual({ type: 'number', optional: false }); // integer cast
+    expect(f.name).toEqual({ type: 'string', optional: false }); // varchar
+    expect(f.joined_at).toEqual({ type: 'string', optional: false }); // datetime -> string
+
+    // whenHas / whenNotNull (null stripped) / whenNull -> the attribute, key optional.
+    expect(f.phone).toEqual({ type: 'string | null', optional: true });
+    expect(f.mobile).toEqual({ type: 'string', optional: true });
+    expect(f.deleted).toEqual({ type: 'string | null', optional: true });
+
+    // Aggregates / existence -> optional scalars.
+    expect(f.posts_count).toEqual({ type: 'number', optional: true });
+    expect(f.orders_sum).toEqual({ type: 'number', optional: true });
+    expect(f.has_avatar).toEqual({ type: 'boolean', optional: true });
+
+    // Literals and computed scalars.
+    expect(f.label).toEqual({ type: 'string', optional: false });
+    expect(f.answer).toEqual({ type: 'number', optional: false });
+    expect(f.flag).toEqual({ type: 'boolean', optional: false });
+    expect(f.full_name).toEqual({ type: 'string', optional: false });
+    expect(f.tags).toEqual({ type: 'any[]', optional: false });
+
+    // when()/unless(): no default -> optional; explicit default -> present value | default.
+    expect(f.nickname).toEqual({ type: 'string', optional: true });
+    expect(f.visibility).toEqual({ type: 'number | string', optional: false });
+    // A column-valued default resolves through metadata too: name (string) | score (number).
+    expect(f.label_or_score).toEqual({ type: 'string | number', optional: false });
+    // Two same-typed columns dedupe to a single member.
+    expect(f.combined_name).toEqual({ type: 'string', optional: false });
+    // A nullable member collapses to a single trailing `| null`.
+    expect(f.contact).toEqual({ type: 'string | null', optional: false });
+    expect(f.archived).toEqual({ type: 'string | null', optional: true });
+  });
+
+  it('resolves resource-wrapping forms, adding | null only for a nullable source column', () => {
+    const f = fieldsOf('RelationsResource');
+
+    // Nullable source column -> Resource | null; non-nullable -> Resource.
+    expect(f.owner).toEqual({ type: 'UserResource | null', optional: false });
+    expect(f.manager).toEqual({ type: 'UserResource', optional: false });
+
+    // whenLoaded wrapped in make/collection -> optional resource / collection.
+    expect(f.author).toEqual({ type: 'UserResource', optional: true });
+    expect(f.comments).toEqual({ type: 'CommentResource[]', optional: true });
+  });
+
+  it('the generated block compiles with circular relations and no skipLibCheck', () => {
+    const { resources: all, enumNames } = buildResources(inputs, metadata, false, new Set(['OrderStatus']));
+    const block = generateResourcesDtsBlock(all, enumNames);
+
+    const ambient = assembleAmbientTypes({
+      blocks: [ENUM_BASE_DTS, generateEnumsDts({ OrderStatus: circularOrderStatus }), block],
+    });
+
+    // CategoryResource <-> ProductResource reference each other; every sibling type a field
+    // names must be in scope for tsc to resolve the block without skipLibCheck.
+    const consumer = dedent`
+      import type { CategoryResource, ProductResource, RelationsResource } from '@ferry/resources';
+      const _c = null as unknown as CategoryResource;
+      const _p = null as unknown as ProductResource;
+      const _r = null as unknown as RelationsResource;
+      void _c; void _p; void _r;
+    `;
+
+    const { ok, output } = typecheck(ambient, consumer, false);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+const circularOrderStatus: EnumDefinition = {
+  name: 'OrderStatus',
+  backing: 'string',
+  cases: [
+    { key: 'PENDING', value: 'pending' },
+    { key: 'SHIPPED', value: 'shipped' },
+  ],
+};
+
 describe('collectResourceInputs (recursion + duplicate short names)', () => {
   const minimalResource = (className: string) =>
     `<?php\nnamespace App;\nuse Illuminate\\Http\\Resources\\Json\\JsonResource;\nclass ${className} extends JsonResource {\n  public function toArray($request): array { return ['id' => $this->id]; }\n}\n`;
@@ -481,7 +588,7 @@ describe('extractFerryAnnotations (via fixture-style docblock)', () => {
 });
 
 /** Type-check `consumer` against the assembled ambient declarations, returning tsc output. */
-function typecheck(ambient: string, consumer: string): { ok: boolean; output: string } {
+function typecheck(ambient: string, consumer: string, skipLibCheck = true): { ok: boolean; output: string } {
   const dir = mkdtempSync(join(tmpdir(), 'ferry-resources-'));
 
   writeFileSync(join(dir, 'ferry.d.ts'), ambient, 'utf8');
@@ -494,7 +601,7 @@ function typecheck(ambient: string, consumer: string): { ok: boolean; output: st
         target: 'esnext',
         moduleResolution: 'bundler',
         module: 'esnext',
-        skipLibCheck: true,
+        skipLibCheck,
         noEmit: true,
         types: [],
       },

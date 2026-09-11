@@ -5,6 +5,7 @@ import {
   parseEnumContent,
   parseModelCasts,
   extractDocblockArrayShape,
+  extractMixinModel,
   parseResourceFieldsAst,
 } from '../src/utils/php-parser.js';
 import { dedent } from './utils.js';
@@ -287,6 +288,94 @@ describe('parseResourceFieldsAst', () => {
     expect(result!.reviewed_by.optional).toBe(true);
   });
 
+  it('resolves the full set of resource property forms statically', () => {
+    const content = readFixture('Resources/AttributeResource.php');
+    const result = parseResourceFieldsAst(content);
+
+    expect(result).not.toBeNull();
+    const r = result!;
+
+    // Bare $this->prop and $this->resource->prop both record a source column.
+    expect(r.id.column).toBe('id');
+    expect(r.id.optional).toBe(false);
+    expect(r.name.column).toBe('name');
+    expect(r.name.optional).toBe(false);
+    // A date attribute (bare) resolves to string.
+    expect(r.joined_at.type).toBe('string');
+    expect(r.joined_at.column).toBe('joined_at');
+
+    // whenHas / whenNotNull / whenNull -> the attribute, key optional.
+    expect(r.phone.column).toBe('phone');
+    expect(r.phone.optional).toBe(true);
+    expect(r.mobile.column).toBe('phone');
+    expect(r.mobile.optional).toBe(true);
+    expect(r.mobile.stripNull).toBe(true);
+    expect(r.deleted.column).toBe('deleted_at');
+    expect(r.deleted.optional).toBe(true);
+    expect(r.deleted.stripNull).toBeUndefined();
+
+    // Aggregates and existence checks -> fixed optional scalar types, no source column.
+    expect(r.posts_count).toMatchObject({ type: 'number', optional: true });
+    expect(r.posts_count.column).toBeUndefined();
+    expect(r.orders_sum).toMatchObject({ type: 'number', optional: true });
+    expect(r.has_avatar).toMatchObject({ type: 'boolean', optional: true });
+
+    // Literals and computed scalars.
+    expect(r.label).toMatchObject({ type: 'string', optional: false });
+    expect(r.answer).toMatchObject({ type: 'number', optional: false });
+    expect(r.flag).toMatchObject({ type: 'boolean', optional: false });
+    expect(r.full_name).toMatchObject({ type: 'string', optional: false });
+    expect(r.full_name.column).toBeUndefined();
+    expect(r.tags.type).toBe('any[]');
+
+    // when()/unless(): no default -> optional; explicit default -> present + union addend.
+    expect(r.nickname.column).toBe('name');
+    expect(r.nickname.optional).toBe(true);
+    expect(r.visibility.column).toBe('score');
+    expect(r.visibility.optional).toBe(false);
+    expect(r.visibility.unionWith).toBe('string');
+    // A column-valued default carries the default's source column so the merge resolves it.
+    expect(r.label_or_score.column).toBe('name');
+    expect(r.label_or_score.optional).toBe(false);
+    expect(r.label_or_score.unionWithColumn).toBe('score');
+    expect(r.archived.column).toBe('deleted_at');
+    expect(r.archived.optional).toBe(true);
+  });
+
+  it('resolves resource-wrapping forms and their nullable source columns', () => {
+    const content = readFixture('Resources/RelationsResource.php');
+    const resourcesDir = join(fixturesDir, 'Resources');
+    const result = parseResourceFieldsAst(content, { resourcesDir });
+
+    expect(result).not.toBeNull();
+    const r = result!;
+
+    // new/make record the source column so the merge can add `| null` when it's nullable.
+    expect(r.owner).toMatchObject({ type: 'UserResource', optional: false, nullFromColumn: 'phone' });
+    expect(r.manager).toMatchObject({ type: 'UserResource', optional: false, nullFromColumn: 'name' });
+
+    // whenLoaded wrapped in a resource -> optional resource / collection, no null source.
+    expect(r.author).toMatchObject({ type: 'UserResource', optional: true });
+    expect(r.author.nullFromColumn).toBeUndefined();
+    expect(r.comments).toMatchObject({ type: 'CommentResource[]', optional: true });
+  });
+
+  it('degrades an unrecognized form to an undecidable any', () => {
+    const content = dedent`
+      <?php
+      class WidgetResource {
+          public function toArray($request): array
+          {
+              return ['meta' => $this->buildMeta($request)];
+          }
+      }
+    `;
+    const result = parseResourceFieldsAst(content);
+
+    expect(result).not.toBeNull();
+    expect(result!.meta).toMatchObject({ type: 'any', undecidable: true });
+  });
+
   it('returns null for invalid PHP', () => {
     const result = parseResourceFieldsAst('not valid php');
     expect(result).toBeNull();
@@ -300,6 +389,18 @@ describe('parseResourceFieldsAst', () => {
   it('returns null for class without toArray method', () => {
     const result = parseResourceFieldsAst('<?php class Foo { public function bar() {} }');
     expect(result).toBeNull();
+  });
+});
+
+describe('extractMixinModel', () => {
+  it('reads the model short name from an @mixin docblock', () => {
+    const content = readFixture('Resources/AttributeResource.php');
+    expect(extractMixinModel(content)).toBe('Account');
+  });
+
+  it('returns null when no @mixin tag is present', () => {
+    const content = readFixture('Resources/UserResource.php');
+    expect(extractMixinModel(content)).toBeNull();
   });
 });
 

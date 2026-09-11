@@ -397,12 +397,24 @@ export type ResourceFieldInfo = {
   type: string;
   optional: boolean;
   loc?: SourceLocation;
-  /** The model property this field reads (`$this->resource->prop`), when known. Lets the
-   * metadata dump override the static leaf type with the real column/cast type. */
+  /** The model property this field reads (`$this->resource->prop`, bare `$this->prop`, or a
+   * `whenHas('prop')` key), when known. Lets the metadata dump override the static leaf type
+   * with the real column/cast type. */
   column?: string;
   /** True when the value is an arbitrary expression ferry can't resolve statically (a
    * method call, a loop-built array, etc.). Signals the caller to degrade the type. */
   undecidable?: boolean;
+  /** Strip a `| null` from the resolved leaf type — a `whenNotNull()` value can't be null. */
+  stripNull?: boolean;
+  /** Append `| <type>` to the resolved leaf type — a `when($cond, value, default)` default.
+   * Carries the default's static fallback type; used when `unionWithColumn` has no metadata. */
+  unionWith?: string;
+  /** A column-valued `when()` default: the merge resolves it through the metadata dump the
+   * same way the value column does, so the field becomes `value | default`. */
+  unionWithColumn?: string;
+  /** Append `| null` to the (kept) static type when this source column is nullable — a
+   * `new XResource($this->col)` / `XResource::make($this->col)` over a nullable attribute. */
+  nullFromColumn?: string;
 };
 
 export type ResourceArrayEntry = {
@@ -418,6 +430,9 @@ export type ParseResourceOptions = {
   docShape?: Record<string, string> | null;
   collectedEnums?: Record<string, EnumDefinition>;
   resourceClass?: string;
+  /** The backing model's short name (from `@mixin`), overriding the `Resource`-suffix
+   * naming convention for the static model-cast lookup. */
+  modelName?: string;
   filePath?: string;
 };
 
@@ -477,7 +492,11 @@ function extractNewResource(newExpr: PhpParserTypes.New): string | null {
 }
 
 /**
- * Extract property name from $this->resource->property.
+ * Extract the model attribute name a node reads. Two equivalent forms resolve the same way,
+ * since a resource proxies `$this->prop` to `$this->resource->prop` through `__get`:
+ *
+ * - `$this->resource->prop` — the explicit form.
+ * - `$this->prop` — the bare form (excluding `$this->resource` itself, which is the model).
  */
 function extractResourceProperty(node: PhpParserTypes.Node): string | null {
   if (node.kind !== 'propertylookup') return null;
@@ -485,7 +504,7 @@ function extractResourceProperty(node: PhpParserTypes.Node): string | null {
   const lookup = node as PhpParserTypes.PropertyLookup;
   const what = lookup.what;
 
-  // Check for $this->resource
+  // $this->resource->prop
   if (what.kind === 'propertylookup') {
     const inner = what as PhpParserTypes.PropertyLookup;
     if (inner.what.kind === 'variable' && (inner.what as PhpParserTypes.Variable).name === 'this') {
@@ -498,7 +517,26 @@ function extractResourceProperty(node: PhpParserTypes.Node): string | null {
     }
   }
 
+  // Bare $this->prop (not $this->resource, which is the model itself).
+  if (what.kind === 'variable' && (what as PhpParserTypes.Variable).name === 'this') {
+    const offset = lookup.offset;
+    const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+    if (name && name !== 'resource') return name;
+  }
+
   return null;
+}
+
+/**
+ * Read the backing model's short name from a `@mixin` docblock tag, e.g.
+ * `@mixin \App\Models\Order` → `Order`. Returns null when no `@mixin` is present, so the
+ * caller falls back to the `Resource`-suffix naming convention.
+ */
+export function extractMixinModel(phpContent: string): string | null {
+  const match = phpContent.match(/@mixin\s+([\\A-Za-z0-9_]+)/);
+  if (!match) return null;
+  const short = match[1].replace(/^\\+/, '').split('\\').pop();
+  return short || null;
 }
 
 /**
@@ -541,12 +579,165 @@ export function getNodeStringValue(node: PhpParserTypes.Node): string | null {
   return getStringValue(node);
 }
 
+/**
+ * Resolve a model attribute reference to its field info. The `column` is always recorded so
+ * the metadata dump can override the static leaf type with the real column/cast type; the
+ * static type here is the offline fallback (model-cast file, then name heuristics).
+ */
+function resolveColumnField(prop: string, optional: boolean, options: ParseResourceOptions): ResourceFieldInfo {
+  const { modelsDir, enumsDir, collectedEnums = {}, resourceClass = '', modelName } = options;
+  const lower = prop.toLowerCase();
+
+  // Booleans by name.
+  if (lower.startsWith('is_') || lower.startsWith('has_') || /^(is|has)[A-Z]/.test(prop)) {
+    return { type: 'boolean', optional, column: prop };
+  }
+
+  // IDs and UUIDs.
+  if (prop === 'id' || prop.endsWith('_id') || lower === 'uuid' || prop.endsWith('Id')) {
+    return { type: 'string', optional, column: prop };
+  }
+
+  // Offline model casts, keyed by the `@mixin` model (or the Resource-suffix convention).
+  const model = modelName || (resourceClass ? resourceClass.replace(/Resource$/, '') : '');
+  if (modelsDir && model) {
+    const modelPath = join(modelsDir, `${model}.php`);
+    if (existsSync(modelPath)) {
+      const modelContent = readFileSafe(modelPath);
+      if (modelContent) {
+        const casts = parseModelCasts(modelContent);
+        if (casts[prop]) {
+          const cast = casts[prop];
+          const trim = cast.trim();
+          const tsType =
+            trim.startsWith('{') || trim.includes(':') || /array\s*\{/.test(trim)
+              ? trim
+              : mapCastToType(cast, enumsDir || '', collectedEnums);
+          return { type: tsType, optional, column: prop };
+        }
+      }
+    }
+  }
+
+  // Date attributes serialize to strings.
+  if (prop.endsWith('_at') || prop.endsWith('At')) {
+    return { type: 'string', optional, column: prop };
+  }
+
+  return { type: 'string', optional, column: prop };
+}
+
+/** Name of an instance method call `$this->method(...)`, or null. */
+function instanceMethodName(call: PhpParserTypes.Call): string | null {
+  if (call.what.kind !== 'propertylookup') return null;
+  const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
+  const offset = lookup.offset;
+  return offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+}
+
+/** The source column of a resource-wrapping argument (`new X($this->col)`), or null. */
+function resourceSourceColumn(args: readonly PhpParserTypes.Node[]): string | null {
+  if (!args || args.length === 0) return null;
+  return extractResourceProperty(args[0]);
+}
+
+/**
+ * Resolve a Laravel conditional-attribute helper call (`when`, `whenHas`, `whenNotNull`, …).
+ * Returns null when the method isn't one ferry types, so the caller falls through to the
+ * generic handling (ultimately the `@ferry` docblock or a clean degrade).
+ */
+function handleInstanceMethod(
+  name: string,
+  call: PhpParserTypes.Call,
+  key: string,
+  options: ParseResourceOptions
+): ResourceFieldInfo | null {
+  const { resourcesDir } = options;
+  const args = (call.arguments ?? []) as PhpParserTypes.Node[];
+
+  switch (name) {
+    // whenLoaded('rel') — resolve the relation's resource when it exists, else a loose record.
+    case 'whenLoaded': {
+      if (resourcesDir && args.length > 0 && args[0].kind === 'string') {
+        const relationName = (args[0] as PhpParserTypes.String).value;
+        if (relationName.length > 0) {
+          const candidate = `${relationName[0].toUpperCase()}${relationName.slice(1)}Resource`;
+          if (existsSync(join(resourcesDir, `${candidate}.php`))) {
+            return { type: candidate, optional: true };
+          }
+        }
+      }
+      return { type: 'Record<string, any>', optional: true };
+    }
+
+    // Aggregates load conditionally and serialize to numbers.
+    case 'whenCounted':
+    case 'whenAggregated':
+      return { type: 'number', optional: true };
+
+    // A conditional existence check serializes to a boolean.
+    case 'whenExistsLoaded':
+      return { type: 'boolean', optional: true };
+
+    // whenHas('attr') — the attribute's type, key optional.
+    case 'whenHas': {
+      if (args.length > 0 && args[0].kind === 'string') {
+        return resolveColumnField((args[0] as PhpParserTypes.String).value, true, options);
+      }
+      return { type: 'any', optional: true, undecidable: true };
+    }
+
+    // whenNotNull(value) — the value's type with `| null` stripped, key optional.
+    case 'whenNotNull': {
+      if (args.length === 0) return { type: 'any', optional: true, undecidable: true };
+      const info = inferTypeFromAstNode(args[0], key, options);
+      info.optional = true;
+      info.stripNull = true;
+      return info;
+    }
+
+    // whenNull(value) — the value's (nullable) type, key optional.
+    case 'whenNull': {
+      if (args.length === 0) return { type: 'any', optional: true, undecidable: true };
+      const info = inferTypeFromAstNode(args[0], key, options);
+      info.optional = true;
+      return info;
+    }
+
+    // when($cond, value[, default]) / unless(...) — no default marks the key optional; an
+    // explicit default keeps the key present and unions the value with the default's type.
+    case 'when':
+    case 'unless': {
+      if (args.length < 2) return { type: 'any', optional: true, undecidable: true };
+      const valueInfo = inferTypeFromAstNode(args[1], key, options);
+      if (args.length >= 3) {
+        const defaultInfo = inferTypeFromAstNode(args[2], key, options);
+        valueInfo.optional = false;
+        // An explicit default makes the field `value | default`. A default that can't be
+        // resolved at all degrades the whole field rather than silently narrowing it; a
+        // column-valued default resolves through the metadata dump at merge time.
+        if (defaultInfo.undecidable) {
+          return { type: 'any', optional: false, undecidable: true };
+        }
+        valueInfo.unionWith = defaultInfo.type;
+        if (defaultInfo.column) valueInfo.unionWithColumn = defaultInfo.column;
+        return valueInfo;
+      }
+      valueInfo.optional = true;
+      return valueInfo;
+    }
+
+    default:
+      return null;
+  }
+}
+
 export function inferTypeFromAstNode(
   node: PhpParserTypes.Node,
   key: string,
   options: ParseResourceOptions = {}
 ): ResourceFieldInfo {
-  const { resourcesDir, modelsDir, enumsDir, docShape, collectedEnums = {}, resourceClass = '' } = options;
+  const { resourcesDir, docShape } = options;
   const optional = containsWhenLoaded(node);
 
   // Use docblock type if available
@@ -554,13 +745,7 @@ export function inferTypeFromAstNode(
     return { type: docShape[key], optional };
   }
 
-  // Boolean heuristics from key name
-  const lowerKey = key.toLowerCase();
-  if (lowerKey.startsWith('is_') || lowerKey.startsWith('has_') || /^(is|has)[A-Z]/.test(key)) {
-    return { type: 'boolean', optional };
-  }
-
-  // Handle static calls: Resource::collection() or Resource::make()
+  // Handle calls: Resource::make()/collection() and the conditional-attribute helpers.
   if (node.kind === 'call') {
     const call = node as PhpParserTypes.Call;
     const staticInfo = extractStaticCallResource(call);
@@ -577,94 +762,56 @@ export function inferTypeFromAstNode(
         }
         return { type: 'any[]', optional };
       }
-      // Resource::make returns a single Resource
+      // Resource::make returns a single Resource (| null when the source column is nullable).
       if (method === 'make') {
         if (resourceExists(resource, resourcesDir)) {
-          return { type: resource, optional };
+          const nullFromColumn = resourceSourceColumn(call.arguments as PhpParserTypes.Node[]);
+          return { type: resource, optional, ...(nullFromColumn ? { nullFromColumn } : {}) };
         }
         return { type: 'any', optional };
       }
     }
 
-    // Check if it's a whenLoaded call without a wrapper resource
-    if (call.what.kind === 'propertylookup') {
-      const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
-      const offset = lookup.offset;
-      const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
-      if (name === 'whenLoaded') {
-        // Try to find matching resource (only if resourcesDir is provided)
-        if (resourcesDir) {
-          const args = call.arguments;
-          if (args.length > 0 && args[0].kind === 'string') {
-            const relationName = (args[0] as PhpParserTypes.String).value;
-            const candidate = `${relationName[0].toUpperCase()}${relationName.slice(1)}Resource`;
-            if (existsSync(join(resourcesDir, `${candidate}.php`))) {
-              return { type: candidate, optional: true };
-            }
-          }
-        }
-        return { type: 'Record<string, any>', optional: true };
-      }
+    // Instance method: $this->whenLoaded(...), $this->when(...), etc.
+    const method = instanceMethodName(call);
+    if (method) {
+      const handled = handleInstanceMethod(method, call, key, options);
+      if (handled) return handled;
     }
   }
 
-  // Handle new Resource()
+  // Handle new Resource() (| null when the source column is nullable).
   if (node.kind === 'new') {
     const newExpr = node as PhpParserTypes.New;
     const resource = extractNewResource(newExpr);
     if (resource) {
       if (resourceExists(resource, resourcesDir)) {
-        return { type: resource, optional };
+        const nullFromColumn = resourceSourceColumn((newExpr.arguments ?? []) as PhpParserTypes.Node[]);
+        return { type: resource, optional, ...(nullFromColumn ? { nullFromColumn } : {}) };
       }
       return { type: 'any', optional };
     }
     return { type: 'any', optional };
   }
 
-  // Handle $this->resource->property
+  // Boolean heuristics from key name (after calls, so a helper on an is_/has_ key still wins).
+  const lowerKey = key.toLowerCase();
+  if (lowerKey.startsWith('is_') || lowerKey.startsWith('has_') || /^(is|has)[A-Z]/.test(key)) {
+    return { type: 'boolean', optional };
+  }
+
+  // Handle $this->resource->property and bare $this->property.
   const prop = extractResourceProperty(node);
   if (prop) {
-    const lower = prop.toLowerCase();
-
-    // Boolean checks
-    if (lower.startsWith('is_') || lower.startsWith('has_') || /^(is|has)[A-Z]/.test(prop)) {
-      return { type: 'boolean', optional: false, column: prop };
-    }
-
-    // IDs and UUIDs
-    if (prop === 'id' || prop.endsWith('_id') || lower === 'uuid' || prop.endsWith('Id')) {
-      return { type: 'string', optional: false, column: prop };
-    }
-
-    // Check model casts
-    if (modelsDir && resourceClass) {
-      const modelCandidate = resourceClass.replace(/Resource$/, '');
-      const modelPath = join(modelsDir, `${modelCandidate}.php`);
-
-      if (existsSync(modelPath)) {
-        const modelContent = readFileSafe(modelPath);
-        if (modelContent) {
-          const casts = parseModelCasts(modelContent);
-          if (casts[prop]) {
-            const cast = casts[prop];
-            const trim = cast.trim();
-            const tsType =
-              trim.startsWith('{') || trim.includes(':') || /array\s*\{/.test(trim)
-                ? trim
-                : mapCastToType(cast, enumsDir || '', collectedEnums);
-            return { type: tsType, optional: false, column: prop };
-          }
-        }
-      }
-    }
-
-    // Timestamps
-    if (prop.endsWith('_at') || prop.endsWith('At')) {
-      return { type: 'string', optional: false, column: prop };
-    }
-
-    return { type: 'string', optional: false, column: prop };
+    return resolveColumnField(prop, false, options);
   }
+
+  // Literals and simple computed scalars.
+  if (node.kind === 'string') return { type: 'string', optional };
+  if (node.kind === 'number') return { type: 'number', optional };
+  if (node.kind === 'boolean') return { type: 'boolean', optional };
+  // String concatenation (`$a . $b`) is always a string.
+  if (node.kind === 'bin' && (node as PhpParserTypes.Bin).type === '.') return { type: 'string', optional };
 
   // Handle nested arrays
   if (node.kind === 'array') {
@@ -813,7 +960,8 @@ export function parseResourceFieldsAst(
   if (!returnNode || !returnNode.expr || returnNode.expr.kind !== 'array') return null;
 
   const arrayNode = returnNode.expr as PhpParserTypes.Array;
-  const entries = parseArrayEntries(arrayNode.items, { ...options, resourceClass: className });
+  const modelName = options.modelName ?? extractMixinModel(phpContent) ?? undefined;
+  const entries = parseArrayEntries(arrayNode.items, { ...options, resourceClass: className, modelName });
 
   // Convert to flat field info
   const result: Record<string, ResourceFieldInfo> = {};

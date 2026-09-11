@@ -6,6 +6,7 @@ import { getPhpFilesRecursive, readFileSafe } from '../utils/file.js';
 import {
   extractDocblockArrayShape,
   extractFerryAnnotations,
+  extractMixinModel,
   parseResourceFieldsAst,
   type EnumDefinition,
   type ResourceFieldInfo,
@@ -214,6 +215,32 @@ export function resolveCast(
 // Merge: static shape + metadata leaf types + annotations + degradation
 // ---------------------------------------------------------------------------
 
+/**
+ * Normalize a scalar union: dedupe members and collapse every `null` into a single trailing
+ * `| null`. Scoped to the `value | default` union the merge assembles, so `string | string`
+ * becomes `string` and `string | null | string` becomes `string | null`, order-independent.
+ */
+export function normalizeUnion(type: string): string {
+  const members = type.split('|').map((m) => m.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  let hasNull = false;
+
+  for (const member of members) {
+    if (member === 'null') {
+      hasNull = true;
+      continue;
+    }
+    if (!seen.has(member)) {
+      seen.add(member);
+      out.push(member);
+    }
+  }
+  if (hasNull) out.push('null');
+
+  return out.join(' | ');
+}
+
 export type MergeResourceOptions = {
   resourceName: string;
   model: string;
@@ -247,6 +274,45 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
   const columns = new Map<string, ColumnMeta>((meta?.columns ?? []).map((c) => [c.name, c]));
   const casts = meta?.casts ?? {};
 
+  /** Resolve one column to its TypeScript leaf type through the metadata dump (cast beats
+   * raw column, nullability composed). Returns `'unresolved'` for a class cast that isn't a
+   * known ferry enum, or null when the column has no metadata at all. */
+  const resolveLeaf = (columnName: string): string | 'unresolved' | null => {
+    const col = columns.get(columnName);
+    const nullable = col?.nullable ?? false;
+    if (casts[columnName] !== undefined) {
+      const resolved = resolveCast(casts[columnName], knownEnums);
+      if (resolved.unresolved) return 'unresolved';
+      if (resolved.enum) enumNames.add(resolved.enum);
+      return nullable ? `${resolved.type} | null` : resolved.type;
+    }
+    if (col) return mapColumnType(col.type_name, col.nullable);
+    return null;
+  };
+
+  /** Apply the field's leaf-type modifiers: strip a nullable, add a nullable from a source
+   * column, then union in a `when()` default. Order matters — stripNull clears the `| null`
+   * a `whenNotNull` column would otherwise carry before any default is unioned on. The
+   * default's addend is resolved by the caller (a column-valued default goes through the
+   * metadata dump), passed in as `unionAddend`. */
+  const finalize = (type: string, info: ResourceFieldInfo, unionAddend?: string): string => {
+    let out = type;
+    if (info.stripNull) {
+      out = out
+        .split('|')
+        .map((p) => p.trim())
+        .filter((p) => p && p !== 'null')
+        .join(' | ');
+    }
+    if (info.nullFromColumn && columns.get(info.nullFromColumn)?.nullable) {
+      out = `${out} | null`;
+    }
+    if (unionAddend) {
+      out = normalizeUnion(`${out} | ${unionAddend}`);
+    }
+    return out;
+  };
+
   const degrade = (field: string, optional: boolean): MergedField => {
     const fallback = strict ? 'unknown' : 'any';
     warnings.push(
@@ -267,6 +333,19 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
       continue;
     }
 
+    // Resolve a `when()` default's union addend. A column-valued default goes through the
+    // same metadata path as the value; an unresolvable class-cast default degrades the whole
+    // field, and a column with no metadata falls back to its static type.
+    let unionAddend = info.unionWith;
+    if (info.unionWithColumn) {
+      const leaf = resolveLeaf(info.unionWithColumn);
+      if (leaf === 'unresolved') {
+        out[field] = degrade(field, optional);
+        continue;
+      }
+      if (leaf !== null) unionAddend = leaf;
+    }
+
     // 2. Metadata leaf type via the source column (cast beats column type). Nullability
     //    of the underlying column composes with either — a nullable column adds `| null`.
     const column = info.column;
@@ -283,11 +362,11 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
           continue;
         }
         if (resolved.enum) enumNames.add(resolved.enum);
-        out[field] = { type: nullable ? `${resolved.type} | null` : resolved.type, optional };
+        out[field] = { type: finalize(nullable ? `${resolved.type} | null` : resolved.type, info, unionAddend), optional };
         continue;
       }
       if (col) {
-        out[field] = { type: mapColumnType(col.type_name, col.nullable), optional };
+        out[field] = { type: finalize(mapColumnType(col.type_name, col.nullable), info, unionAddend), optional };
         continue;
       }
     }
@@ -299,7 +378,7 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
     }
 
     // 4. Static type (includes enum names resolved from static casts).
-    out[field] = { type: info.type, optional };
+    out[field] = { type: finalize(info.type, info, unionAddend), optional };
   }
 
   return out;
@@ -486,18 +565,22 @@ export function collectResourceInputs(options: {
       const docShape = extractDocblockArrayShape(content);
       const mappedDocShape = docShape ? mapDocShape(docShape) : null;
 
+      // The backing model: the `@mixin` docblock when present, else the naming convention.
+      const model = extractMixinModel(content) ?? className.replace(/Resource$/, '');
+
       const staticFields = parseResourceFieldsAst(content, {
         resourcesDir,
         modelsDir,
         enumsDir,
         docShape: mappedDocShape,
         collectedEnums,
+        modelName: model,
         filePath: relativePhpPath,
       });
 
       inputs.push({
         className,
-        model: className.replace(/Resource$/, ''),
+        model,
         staticFields,
         annotations: extractFerryAnnotations(content),
         enumNames: Object.keys(collectedEnums),
