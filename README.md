@@ -9,7 +9,7 @@
 ## Features
 
 - 🧭 **Routes** — a fully typed `route()` helper resolving named routes to their URL and method client-side, with zero route table shipped to the browser
-- 🏷️ **Enums** — PHP enums become real JS classes with `is`/`from`/`values`/`keys`/`cases`/`options`, narrowed to their literal value union
+- 🏷️ **Enums** — PHP enums become real JS classes with `is`/`from`/`fromOrFail`/`values`/`keys`/`cases`/`options`, narrowed to their literal value union
 - 📦 **Resources** — precise types for your `JsonResource` classes from static shape analysis plus real column/cast metadata, degrading gracefully instead of breaking your build
 - 🧩 **Page props** — the props an Inertia page receives, typed through `usePage<T>()` and Inertia's own `sharedPageProps` augmentation
 - ⚛️ **React, Vue & Svelte** — `route()` and `route.isCurrent()` resolve through ferry on every frontend, in dev and production (the `.url` codemod sugar is React/plain-TS only)
@@ -128,15 +128,18 @@ export class OrderStatus extends Enum {
   static REJECTED = new OrderStatus('REJECTED', 'rejected', 'Rejected');
 }
 
-OrderStatus.PENDING.value;     // 'pending'
-OrderStatus.PENDING.label;     // 'Pending Order' (undefined when the PHP enum has no label())
-OrderStatus.from('approved');  // OrderStatus.APPROVED
-OrderStatus.PENDING.is(order.status); // instance equality by value
-OrderStatus.values();          // ['pending', 'approved', 'rejected']
-OrderStatus.options();         // [{ value: 'pending', label: 'Pending Order' }, ...]
+OrderStatus.PENDING.value;        // 'pending'
+OrderStatus.PENDING.label;        // 'Pending Order' (undefined when the PHP enum has no label())
+OrderStatus.from('approved');     // OrderStatus.APPROVED — undefined for an unknown value
+OrderStatus.fromOrFail('approved'); // OrderStatus.APPROVED — throws for an unknown value
+OrderStatus.PENDING.is(order.status); // true when the raw backing value (or a case) matches
+OrderStatus.values();             // ['pending', 'approved', 'rejected']
+OrderStatus.options();            // [{ value: 'pending', label: 'Pending Order' }, ...]
 ```
 
-Each case is a real instance of a generated class extending the base `Enum` from `@ferry/enum` — a class is both a value and a type, so `status: OrderStatus` just works. Int-backed enums keep their numeric `value`; unbacked enums use the case name as the value.
+Each case is a real instance of a generated class extending the base `Enum` from `@ferry/enum` — a class is both a value and a type. Int-backed enums keep their numeric `value`; unbacked enums use the case name as the value. `from()` returns `undefined` for a value with no case; `fromOrFail()` is the throwing variant when you need a guaranteed case. `is()` compares a case against either another case or a raw backing value.
+
+Resource data arrives as the raw backing value over JSON, not an instance, so an enum-cast resource field types as the enum's `<Enum>Value` backing-value union (e.g. `OrderStatusValue`), not the `OrderStatus` class. Compare it against a case with `resource.status === OrderStatus.PENDING.value` or `OrderStatus.PENDING.is(resource.status)`.
 
 ### Resources — `@ferry/resources`
 

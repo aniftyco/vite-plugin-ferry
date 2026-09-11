@@ -10,13 +10,20 @@ export const ENUM_BASE_RUNTIME = `export class Enum {
     Object.freeze(this);
   }
   is(other) {
-    return other.value === this.value;
+    return (other instanceof Enum ? other.value : other) === this.value;
   }
   toString() {
     return String(this.value);
   }
   static from(value) {
     return this.cases().find((c) => c.value === value);
+  }
+  static fromOrFail(value) {
+    const found = this.from(value);
+    if (found === undefined) {
+      throw new Error(\`\${this.name}: no case for value \${JSON.stringify(value)}\`);
+    }
+    return found;
   }
   static values() {
     return this.cases().map((c) => c.value);
@@ -43,9 +50,10 @@ export const ENUM_BASE_DTS = `declare module '@ferry/enum' {
     readonly value: V;
     readonly label: string | undefined;
     constructor(key: string, value: V, label?: string);
-    is(other: Enum<V>): boolean;
+    is(other: V | Enum<V>): boolean;
     toString(): string;
-    static from(value: unknown): Enum;
+    static from(value: unknown): Enum | undefined;
+    static fromOrFail(value: unknown): Enum;
     static values(): unknown[];
     static keys(): string[];
     static cases(): Enum[];

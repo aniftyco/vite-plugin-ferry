@@ -72,9 +72,9 @@ describe('mapColumnType', () => {
 describe('resolveCast', () => {
   const knownEnums = new Set(['OrderStatus']);
 
-  it('maps a known ferry enum cast (FQCN or short) to the enum type and reports the enum name', () => {
-    expect(resolveCast('App\\Enums\\OrderStatus', knownEnums)).toEqual({ type: 'OrderStatus', enum: 'OrderStatus' });
-    expect(resolveCast('OrderStatus', knownEnums)).toEqual({ type: 'OrderStatus', enum: 'OrderStatus' });
+  it('maps a known ferry enum cast (FQCN or short) to its backing-value type and reports the enum name', () => {
+    expect(resolveCast('App\\Enums\\OrderStatus', knownEnums)).toEqual({ type: 'OrderStatusValue', enum: 'OrderStatus' });
+    expect(resolveCast('OrderStatus', knownEnums)).toEqual({ type: 'OrderStatusValue', enum: 'OrderStatus' });
   });
 
   it('marks a class cast that is NOT a known ferry enum as unresolved (no @ferry/enums import)', () => {
@@ -140,10 +140,10 @@ describe('mergeResourceFields', () => {
 
     // cast wins: integer cast on a non-nullable id column -> number
     expect(fields.id.type).toBe('number');
-    // enum cast on a non-nullable column -> the ferry enum type
-    expect(fields.status.type).toBe('OrderStatus');
-    // enum cast on a NULLABLE column -> the two rules compose: `OrderStatus | null`
-    expect(fields.state.type).toBe('OrderStatus | null');
+    // enum cast on a non-nullable column -> the enum's backing-value type
+    expect(fields.status.type).toBe('OrderStatusValue');
+    // enum cast on a NULLABLE column -> the two rules compose: `OrderStatusValue | null`
+    expect(fields.state.type).toBe('OrderStatusValue | null');
     expect(enumNames.has('OrderStatus')).toBe(true);
     // non-enum primitive cast (`array`) on a nullable column -> `any[] | null`
     expect(fields.settings.type).toBe('any[] | null');
@@ -309,13 +309,13 @@ describe('buildResources', () => {
 });
 
 describe('generateResourcesDtsBlock', () => {
-  it('renders a declare module block importing referenced enums from @ferry/enums', () => {
+  it('renders a declare module block importing referenced enum value types from @ferry/enums', () => {
     const resources: Record<string, ResourceEntry> = {
       OrderResource: {
         kind: 'shape',
         fields: {
           id: { type: 'number', optional: false },
-          status: { type: 'OrderStatus', optional: false },
+          status: { type: 'OrderStatusValue', optional: false },
           author: { type: 'UserResource', optional: true },
         },
       },
@@ -325,11 +325,11 @@ describe('generateResourcesDtsBlock', () => {
 
     expect(block).toBe(dedent`
       declare module '@ferry/resources' {
-        import { OrderStatus } from '@ferry/enums';
+        import { OrderStatusValue } from '@ferry/enums';
 
         export type OrderResource = {
           id: number;
-          status: OrderStatus;
+          status: OrderStatusValue;
           author?: UserResource;
         };
       }
@@ -681,7 +681,8 @@ describe('generated resource types (tsc --noEmit consumer check)', () => {
       kind: 'shape',
       fields: {
         id: { type: 'number', optional: false },
-        status: { type: 'OrderStatus', optional: false },
+        status: { type: 'OrderStatusValue', optional: false },
+        state: { type: 'OrderStatusValue | null', optional: false },
         user: { type: 'UserResource', optional: true },
         notes: { type: 'string | null', optional: false },
       },
@@ -702,26 +703,36 @@ describe('generated resource types (tsc --noEmit consumer check)', () => {
     expect(topLevel).toEqual([]);
   });
 
-  it('type-checks a consumer using resources, enums and routes together, with enum refs resolving', () => {
+  it('type-checks a consumer comparing enum-cast fields against case backing values', () => {
     const consumer = dedent`
       import type { OrderResource, UserResource } from '@ferry/resources';
-      import { OrderStatus } from '@ferry/enums';
+      import { OrderStatus, type OrderStatusValue } from '@ferry/enums';
 
+      // Enum-cast fields carry the raw backing value the JSON delivers, not an instance.
       const order: OrderResource = {
         id: 1,
-        status: OrderStatus.PENDING,
+        status: OrderStatus.PENDING.value,
+        state: null,
         notes: null,
       };
 
-      const status: OrderStatus = order.status;
+      // The field is the enum's value type; nullable columns add | null.
+      const status: OrderStatusValue = order.status;
+      const state: OrderStatusValue | null = order.state;
       const notes: string | null = order.notes;
       const owner: UserResource | undefined = order.user;
+
+      // Comparing a field against a case's backing value type-checks and is true on a match.
+      const matched: boolean = order.status === OrderStatus.PENDING.value;
+
+      // A case can be compared against the raw field value via is().
+      const viaIs: boolean = OrderStatus.PENDING.is(order.status);
 
       // routes' declarations still coexist in the same ambient file
       const url: string = route('users.show', { user: 1 }).url;
 
-      // @ts-expect-error status is an OrderStatus instance, not a string
-      const bad: string = order.status;
+      // @ts-expect-error status is a backing value, not an OrderStatus instance
+      const bad: OrderStatus = order.status;
     `;
 
     const { ok, output } = typecheck(ambient, consumer);

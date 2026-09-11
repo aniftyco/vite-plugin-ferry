@@ -20,13 +20,14 @@ type EnumInstance = {
   readonly key: string;
   readonly value: any;
   readonly label: string | undefined;
-  is(other: EnumInstance): boolean;
+  is(other: EnumInstance | any): boolean;
   toString(): string;
 };
 
 type EnumClass = {
   new (...args: any[]): EnumInstance;
   from(value: unknown): EnumInstance | undefined;
+  fromOrFail(value: unknown): EnumInstance;
   values(): any[];
   keys(): string[];
   cases(): EnumInstance[];
@@ -89,6 +90,21 @@ describe('base Enum runtime behavior (E12)', () => {
   it('is() compares cases by value', () => {
     expect(OrderStatus.PENDING.is(OrderStatus.PENDING)).toBe(true);
     expect(OrderStatus.PENDING.is(OrderStatus.APPROVED)).toBe(false);
+  });
+
+  it('is() compares a case against a raw backing value', () => {
+    // Resource data arrives as the raw backing value, not an instance.
+    expect(OrderStatus.PENDING.is('pending')).toBe(true);
+    expect(OrderStatus.PENDING.is('approved')).toBe(false);
+    // Int-backed: 0 is falsy but must still compare by value, not truthiness.
+    expect(Priority.LOW.is(1)).toBe(true);
+    expect(Priority.LOW.is(3)).toBe(false);
+  });
+
+  it('fromOrFail() returns the matching instance and throws for an unknown value', () => {
+    expect(OrderStatus.fromOrFail('pending')).toBe(OrderStatus.PENDING);
+    expect(Priority.fromOrFail(3)).toBe(Priority.HIGH);
+    expect(() => OrderStatus.fromOrFail('bogus')).toThrow();
   });
 
   it('toString() returns the backing value', () => {
@@ -193,8 +209,11 @@ describe('generated enum types (tsc --noEmit consumer check) (E10/E16)', () => {
     const consumer = dedent`
       import { OrderStatus, type OrderStatusValue } from '@ferry/enums';
 
-      // positive: from(literal) type-checks and is typed as OrderStatus
-      const x: OrderStatus = OrderStatus.from('pending');
+      // positive: from() is nullable — it returns undefined for an unknown value at runtime
+      const x: OrderStatus | undefined = OrderStatus.from('pending');
+
+      // positive: fromOrFail() is the throwing variant, so its result is a guaranteed case
+      const g: OrderStatus = OrderStatus.fromOrFail('pending');
 
       // positive: .value is assignable to the value union, .key to the key union
       const v: OrderStatusValue = OrderStatus.PENDING.value;
@@ -203,6 +222,11 @@ describe('generated enum types (tsc --noEmit consumer check) (E10/E16)', () => {
       // positive: the instance carries its label
       const l: string | undefined = OrderStatus.PENDING.label;
 
+      // positive: is() compares a case against a raw backing value or another instance
+      const rawStatus: OrderStatusValue = 'pending';
+      const matchesValue: boolean = OrderStatus.PENDING.is(rawStatus);
+      const matchesInstance: boolean = OrderStatus.PENDING.is(OrderStatus.APPROVED);
+
       const someApiString: string = 'pending';
 
       // @ts-expect-error 'foobar' is not a valid OrderStatus value
@@ -210,6 +234,9 @@ describe('generated enum types (tsc --noEmit consumer check) (E10/E16)', () => {
 
       // @ts-expect-error a plain string is not narrowed to the value union
       OrderStatus.from(someApiString);
+
+      // @ts-expect-error is() rejects a value outside the enum's backing-value union
+      OrderStatus.PENDING.is('foobar');
     `;
 
     const { ok, output } = typecheck(ambient, consumer);

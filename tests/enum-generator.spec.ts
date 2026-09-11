@@ -139,7 +139,8 @@ describe('generateEnumDtsClass', () => {
         readonly key: 'PENDING' | 'APPROVED' | 'REJECTED';
         readonly value: OrderStatusValue;
         readonly label: string | undefined;
-        static from(value: OrderStatusValue): OrderStatus;
+        static from(value: OrderStatusValue): OrderStatus | undefined;
+        static fromOrFail(value: OrderStatusValue): OrderStatus;
         static values(): OrderStatusValue[];
         static keys(): Array<'PENDING' | 'APPROVED' | 'REJECTED'>;
         static cases(): OrderStatus[];
@@ -158,7 +159,8 @@ describe('generateEnumDtsClass', () => {
         readonly key: 'RED' | 'GREEN' | 'BLUE';
         readonly value: ColorValue;
         readonly label: string | undefined;
-        static from(value: ColorValue): Color;
+        static from(value: ColorValue): Color | undefined;
+        static fromOrFail(value: ColorValue): Color;
         static values(): ColorValue[];
         static keys(): Array<'RED' | 'GREEN' | 'BLUE'>;
         static cases(): Color[];
@@ -176,7 +178,8 @@ describe('generateEnumDtsClass', () => {
         readonly key: 'LOW' | 'HIGH';
         readonly value: PriorityValue;
         readonly label: string | undefined;
-        static from(value: PriorityValue): Priority;
+        static from(value: PriorityValue): Priority | undefined;
+        static fromOrFail(value: PriorityValue): Priority;
         static values(): PriorityValue[];
         static keys(): Array<'LOW' | 'HIGH'>;
         static cases(): Priority[];
@@ -201,7 +204,8 @@ describe('generateEnumsDts', () => {
           readonly key: 'ADMIN' | 'USER';
           readonly value: RoleValue;
           readonly label: string | undefined;
-          static from(value: RoleValue): Role;
+          static from(value: RoleValue): Role | undefined;
+          static fromOrFail(value: RoleValue): Role;
           static values(): RoleValue[];
           static keys(): Array<'ADMIN' | 'USER'>;
           static cases(): Role[];

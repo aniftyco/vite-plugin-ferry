@@ -197,8 +197,9 @@ function mapDbType(typeName: string): string {
 
 /**
  * Resolve a cast token to a TypeScript type. A class-name cast (an FQCN or a PascalCase
- * name) resolves to a ferry enum ONLY when its short name is in `knownEnums` — the set of
- * enums ferry actually generates into `@ferry/enums`. A class cast that is NOT a known
+ * name) resolves to a ferry enum's `<Enum>Value` backing-value type ONLY when its short name
+ * is in `knownEnums` — the set of enums ferry actually generates into `@ferry/enums` (the
+ * field carries the raw backing value over JSON, not an Enum instance). A class cast that is NOT a known
  * ferry enum (Laravel's built-in `AsCollection`/`AsArrayObject`/`AsStringable`, or any
  * custom `Castable` / value object) is something ferry can't type precisely: it returns
  * `unresolved` so the caller degrades it, rather than emitting a broken `@ferry/enums`
@@ -215,7 +216,9 @@ export function resolveCast(
   if ((raw.includes('\\') || /^[A-Z][A-Za-z0-9_]*$/.test(raw)) && !PRIMITIVE_CASTS.has(low)) {
     const short = raw.split('\\').pop()!.replace(/::class$/, '');
     if (knownEnums.has(short)) {
-      return { type: short, enum: short };
+      // Resource data arrives as the enum's raw backing value over JSON, not an instance,
+      // so the field types as the generated `<Enum>Value` union rather than the Enum class.
+      return { type: `${short}Value`, enum: short };
     }
     return { type: '', unresolved: true };
   }
@@ -528,14 +531,14 @@ export function generateResourcesDtsBlock(resources: Record<string, ResourceEntr
     return `declare module '${RESOURCES_MODULE_ID}' {}`;
   }
 
-  // Only import enums actually referenced by a rendered field type.
+  // Only import the `<Enum>Value` types actually referenced by a rendered field type.
   const used = new Set<string>();
   for (const name of names) {
     const entry = resources[name];
     if (entry.kind !== 'shape') continue;
     for (const field of Object.values(entry.fields)) {
       for (const enumName of enumNames) {
-        if (typeContainsName(field.type, enumName)) used.add(enumName);
+        if (typeContainsName(field.type, `${enumName}Value`)) used.add(`${enumName}Value`);
       }
     }
   }
