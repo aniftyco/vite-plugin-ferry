@@ -12,6 +12,7 @@ class ProfileResource extends JsonResource
         return [
             'settings' => $this->resource->settings,
             'prefs' => $this->resource->settings,
+            'author' => $this->resource->author,
             'tags' => $this->resource->tags,
         ];
     }

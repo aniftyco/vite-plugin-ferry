@@ -31,12 +31,13 @@ export function mapDocTypeToTs(docType: string): string {
   if (arrShape) {
     const inside = arrShape[1];
     const parts: string[] = [];
-    const innerRe = /(?<key>[A-Za-z0-9_]+)\s*:\s*(?<type>[^,\n}]+)/g;
+    const innerRe = /(?<key>[A-Za-z0-9_]+)(?<optional>\?)?\s*:\s*(?<type>[^,\n}]+)/g;
 
     for (const mm of inside.matchAll(innerRe)) {
       const k = (mm as any).groups.key;
+      const optional = (mm as any).groups.optional ? '?' : '';
       const t = (mm as any).groups.type.trim();
-      parts.push(`${k}: ${mapDocTypeToTs(t)}`);
+      parts.push(`${k}${optional}: ${mapDocTypeToTs(t)}`);
     }
 
     const obj = `{ ${parts.join('; ')} }`;

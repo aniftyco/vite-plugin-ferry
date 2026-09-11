@@ -83,6 +83,16 @@ describe('mapDocTypeToTs', () => {
     expect(result).toBe('{ id: string } | null');
   });
 
+  it('emits optional keys for a fully-optional array shape with a union value', () => {
+    const result = mapDocTypeToTs('array{name?: string, email?: string|null}');
+    expect(result).toBe('{ name?: string; email?: string | null }');
+  });
+
+  it('emits optional keys alongside required keys in a partially-optional shape', () => {
+    const result = mapDocTypeToTs('array{name: string, email?: string}');
+    expect(result).toBe('{ name: string; email?: string }');
+  });
+
   it('preserves Record types', () => {
     expect(mapDocTypeToTs('Record<string, any>')).toBe('Record<string, any>');
   });

@@ -706,6 +706,17 @@ describe('@property array{...} shape refines an array cast (#21)', () => {
     expect(f.settings).toEqual({ type: '{ theme: string; notifications: boolean }', optional: false });
     expect(f.tags).toEqual({ type: 'any[]', optional: false });
   });
+
+  it('emits optional keys for an array cast documented with an optional-key shape', () => {
+    // @property array{name?: string, email?: string|null} $author -> object with `?` keys.
+    const f = profileFields(metadata);
+    expect(f.author).toEqual({ type: '{ name?: string; email?: string | null }', optional: false });
+  });
+
+  it('emits the optional-key object literal via the offline model-file path (no metadata)', () => {
+    const f = profileFields({});
+    expect(f.author).toEqual({ type: '{ name?: string; email?: string | null }', optional: false });
+  });
 });
 
 const circularOrderStatus: EnumDefinition = {
