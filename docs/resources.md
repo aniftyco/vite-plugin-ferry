@@ -49,7 +49,40 @@ A bare `whenLoaded('rel')` types by the relation's resource. A `whenLoaded('rel'
 
 ### Nested resources and merges
 
-`Resource::make()` and `new Resource()` resolve to a single nested type (`| null` when the source column is nullable), `Resource::collection()` to an array, and `mergeWhen()` lifts an inline literal's keys in as optional. Literals and simple computed scalars (strings, numbers, booleans, concatenation, inline arrays) infer directly.
+`Resource::make()` and `new Resource()` resolve to a single nested type (`| null` when the source column is nullable), `Resource::collection()` to an array (or a [paginated envelope](#pagination) when its argument is a paginator), and `mergeWhen()` lifts an inline literal's keys in as optional. Literals and simple computed scalars (strings, numbers, booleans, concatenation, inline arrays) infer directly.
+
+## Pagination
+
+`Resource::collection($query->paginate())` types as the paginated envelope instead of a bare array — Laravel wraps paginated JSON in `{ data, links, meta }`, not `Item[]`:
+
+```php
+public function index(Request $request): array
+{
+    return [
+        'orders' => OrderResource::collection(Order::query()->paginate()),
+    ];
+}
+```
+
+```ts
+import type { LengthAwarePaginated } from '@ferry/pagination';
+import type { OrderResource } from '@ferry/resources';
+
+declare const orders: LengthAwarePaginated<OrderResource>;
+orders.data; // OrderResource[]
+orders.meta.total; // number
+orders.links.next; // string | null
+```
+
+Ferry detects the paginator by walking the argument's method chain for a call to `paginate()`, `simplePaginate()`, or `cursorPaginate()`, and emits the matching `@ferry/pagination` generic:
+
+| Call               | Type                          |
+| ------------------- | ----------------------------- |
+| `paginate()`        | `LengthAwarePaginated<Item>` |
+| `simplePaginate()`  | `SimplePaginated<Item>`      |
+| `cursorPaginate()`  | `CursorPaginated<Item>`      |
+
+Detection is structural — there's no symbol table, so a paginator held in a variable or built through an unrecognized chain (`Resource::collection($paginator)`) can't be confirmed as a paginator. Rather than silently mistyping it as `Item[]`, ferry warns and keeps the array fallback; wrap the query inline (or rename the argument's own chain to end in one of the three calls) to resolve it precisely. A `whenLoaded('rel')`-wrapped or plain relation-property argument is never flagged — Eloquent always serializes those as a `Collection`, never a paginator.
 
 ## Leaf types
 

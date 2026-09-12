@@ -480,6 +480,93 @@ describe('parseResourceFieldsAst', () => {
   });
 });
 
+describe('Resource::collection(...) paginator detection (issue #27)', () => {
+  const resourcesDir = join(fixturesDir, 'Resources');
+
+  /** One toArray() body per case, built into a self-contained resource so each field's
+   * inference can be asserted independently of the shared fixture files. */
+  function collectionContent(expr: string): string {
+    return dedent`
+      <?php
+      class PaginatorResource {
+          public function toArray($request): array
+          {
+              return ['items' => UserResource::collection(${expr})];
+          }
+      }
+    `;
+  }
+
+  it('types a ->paginate() argument as the LengthAwarePaginated envelope', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->paginate()'), { resourcesDir });
+    expect(result!.items).toMatchObject({ type: 'LengthAwarePaginated<UserResource>' });
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('types a ->simplePaginate() argument as the SimplePaginated envelope', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->simplePaginate()'), { resourcesDir });
+    expect(result!.items).toMatchObject({ type: 'SimplePaginated<UserResource>' });
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('types a ->cursorPaginate() argument as the CursorPaginated envelope', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->cursorPaginate()'), { resourcesDir });
+    expect(result!.items).toMatchObject({ type: 'CursorPaginated<UserResource>' });
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('resolves a paginator kind through an intermediate chain link (query building before ->paginate())', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->where("active", true)->paginate(15)'), {
+      resourcesDir,
+    });
+    expect(result!.items.type).toBe('LengthAwarePaginated<UserResource>');
+  });
+
+  it('falls back to Item[] and flags a bare variable argument as an unresolved paginator', () => {
+    const result = parseResourceFieldsAst(collectionContent('$users'), { resourcesDir });
+    expect(result!.items).toMatchObject({ type: 'UserResource[]', paginatorUnresolved: true });
+  });
+
+  it('falls back to Item[] and flags a chain that never resolves to a paginator method', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->someCustomTerminal()'), {
+      resourcesDir,
+    });
+    expect(result!.items).toMatchObject({ type: 'UserResource[]', paginatorUnresolved: true });
+  });
+
+  it('does NOT flag ->get() — a terminal Eloquent/Collection method, never a paginator', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->get()'), { resourcesDir });
+    expect(result!.items.type).toBe('UserResource[]');
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('does NOT flag ->all() — a terminal Eloquent/Collection method, never a paginator', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->all()'), { resourcesDir });
+    expect(result!.items.type).toBe('UserResource[]');
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it("does NOT emit an envelope for a paginate() call nested inside a whenLoaded closure — that call belongs to a different expression, not this argument's own shape", () => {
+    const result = parseResourceFieldsAst(collectionContent("$this->whenLoaded('x', fn () => $q->paginate())"), {
+      resourcesDir,
+    });
+    expect(result!.items.type).toBe('UserResource[]');
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('does NOT flag a whenLoaded-wrapped relation — Eloquent always serializes it as a Collection', () => {
+    const result = parseResourceFieldsAst(collectionContent("$this->whenLoaded('users')"), { resourcesDir });
+    expect(result!.items.type).toBe('UserResource[]');
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('does NOT flag a plain property read — ordinary relation access, never a paginator', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->resource->users'), { resourcesDir });
+    expect(result!.items.type).toBe('UserResource[]');
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+});
+
 describe('resourceMergesParent', () => {
   it('is true when toArray returns array_merge(parent::toArray(...), [...])', () => {
     const php = dedent`

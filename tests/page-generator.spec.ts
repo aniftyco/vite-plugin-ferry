@@ -1,10 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { assembleAmbientTypes } from '../src/delivery/ambient-types.js';
 import { ENUM_BASE_DTS } from '../src/delivery/enum-base.js';
+import { PAGINATION_BASE_DTS } from '../src/delivery/pagination-base.js';
 import { collectEnums, generateEnumsDts, type EnumDefinition } from '../src/generators/enums.js';
 import {
   pageKeyToTypeName,
@@ -236,9 +237,7 @@ describe('collectSharedInput (HandleInertiaRequests::share)', () => {
     // pinned fields through the same finalize path buildPages uses; no "could not be resolved
     // statically" warning is emitted for the pinned `settings` prop.
     const { warnings } = buildPages([{ key: 'share()', fields: shared.fields }], false);
-    expect(warnings.some((w) => w.includes('settings') && w.includes('could not be resolved statically'))).toBe(
-      false
-    );
+    expect(warnings.some((w) => w.includes('settings') && w.includes('could not be resolved statically'))).toBe(false);
   });
 
   it('merges parent::share() fields, with the child taking precedence on collisions (AC1)', () => {
@@ -651,6 +650,110 @@ describe('a bare enum-name page pin resolves to its value union end-to-end (tsc 
       // @ts-expect-error 'BOGUS' is outside the OrderStatusValue backing-value union.
       props.kind = 'BOGUS';
     `;
+    const { ok, output } = typecheck(ambient, '', consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('Resource::collection(...) over a paginator in a page prop (issue #27)', () => {
+  function scratch(): { dir: string; controllersDir: string } {
+    const dir = mkdtempSync(join(repoRoot, 'ferry-page-pagination-'));
+    const controllersDir = join(dir, 'Controllers');
+    mkdirSync(controllersDir, { recursive: true });
+    return { dir, controllersDir };
+  }
+
+  function collectOrders(expr: string) {
+    const { dir, controllersDir } = scratch();
+    try {
+      writeFileSync(
+        join(controllersDir, 'OrderController.php'),
+        dedent`
+          <?php
+          namespace App\\Http\\Controllers;
+          use App\\Http\\Resources\\OrderResource;
+          use Inertia\\Inertia;
+          class OrderController extends Controller {
+              public function index() {
+                  return Inertia::render('Orders/Index', [
+                      'orders' => OrderResource::collection(${expr}),
+                  ]);
+              }
+          }
+        `,
+        'utf8'
+      );
+
+      return collectRenderInputs({
+        controllersDir,
+        resourcesDir: join(fixturesDir, 'Resources'),
+        modelsDir: join(fixturesDir, 'Models'),
+        enumsDir: join(fixturesDir, 'Enums'),
+        knownEnums,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('types a ->paginate() prop as the LengthAwarePaginated envelope', () => {
+    const inputs = collectOrders('$this->orders()->paginate()');
+    const page = inputs.find((i) => i.key === 'Orders/Index')!;
+    expect(page.fields.orders.type).toBe('LengthAwarePaginated<OrderResource>');
+  });
+
+  it('types a ->simplePaginate() prop as the SimplePaginated envelope', () => {
+    const inputs = collectOrders('$this->orders()->simplePaginate()');
+    const page = inputs.find((i) => i.key === 'Orders/Index')!;
+    expect(page.fields.orders.type).toBe('SimplePaginated<OrderResource>');
+  });
+
+  it('types a ->cursorPaginate() prop as the CursorPaginated envelope', () => {
+    const inputs = collectOrders('$this->orders()->cursorPaginate()');
+    const page = inputs.find((i) => i.key === 'Orders/Index')!;
+    expect(page.fields.orders.type).toBe('CursorPaginated<OrderResource>');
+  });
+
+  it('falls back to OrderResource[] and warns when the argument could be a paginator but the kind cannot be resolved', () => {
+    const inputs = collectOrders('$orders');
+    const page = inputs.find((i) => i.key === 'Orders/Index')!;
+    expect(page.fields.orders.type).toBe('OrderResource[]');
+    expect(page.fields.orders.paginatorUnresolved).toBe(true);
+
+    const { warnings } = buildPages(inputs, false);
+    expect(warnings.some((w) => w.includes('Orders/Index.orders') && w.includes('paginator kind'))).toBe(true);
+  });
+
+  it('proves the envelope is real, checked shape — not any — via a negative tsc assertion', () => {
+    const pages: PageEntry[] = [
+      { typeName: 'OrdersIndexProps', type: '{ orders: LengthAwarePaginated<UserResource> }' },
+    ];
+    const resources: Record<string, ResourceEntry> = {
+      UserResource: { kind: 'shape', fields: { id: { type: 'number', optional: false } } },
+    };
+
+    const ambient = assembleAmbientTypes({
+      blocks: [
+        PAGINATION_BASE_DTS,
+        generateResourcesDtsBlock(resources, new Set()),
+        generatePagesDtsBlock(pages, knownResources, new Set()),
+      ],
+    });
+
+    const consumer = dedent`
+      import type { OrdersIndexProps } from '@ferry/pages';
+      declare const props: OrdersIndexProps;
+
+      const total: number = props.orders.meta.total;
+      const items: { id: number }[] = props.orders.data;
+
+      // @ts-expect-error the envelope has no array indexing/length — it is NOT UserResource[].
+      // Were the prop silently \`any\`, this directive would be unused and tsc would fail
+      // (TS2578); the positive .meta/.data assertions above are what catch a degrade back to
+      // the old Item[] shape, since Item[] would compile the \`.length\` read too.
+      const bogus: string = props.orders.length;
+    `;
+
     const { ok, output } = typecheck(ambient, '', consumer);
     expect(ok, `tsc reported errors:\n${output}`).toBe(true);
   });

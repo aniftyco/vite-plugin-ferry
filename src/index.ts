@@ -140,6 +140,7 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
             `${namespace}/route`,
             `${namespace}/pages`,
             `${namespace}/forms`,
+            `${namespace}/pagination`,
           ],
         },
       };

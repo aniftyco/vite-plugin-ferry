@@ -1,11 +1,13 @@
 import { join } from 'node:path';
 import { writeAmbientTypes } from './ambient-types.js';
 import { ENUM_BASE_RUNTIME, ENUM_BASE_DTS } from './enum-base.js';
+import { PAGINATION_BASE_DTS } from './pagination-base.js';
 import { VirtualModuleRegistry, DtsRegistry, ModuleFileRegistry } from './registry.js';
 
 export * from './registry.js';
 export * from './ambient-types.js';
 export * from './enum-base.js';
+export * from './pagination-base.js';
 
 /** The ferry virtual module ids served at runtime. */
 export const FERRY_MODULE_IDS = [
@@ -15,6 +17,7 @@ export const FERRY_MODULE_IDS = [
   '@ferry/route',
   '@ferry/pages',
   '@ferry/forms',
+  '@ferry/pagination',
 ] as const;
 
 /** Runtime placeholder for feature modules whose real content arrives in a later build-order step. */
@@ -46,6 +49,11 @@ export type Delivery = {
 function registerDefaults(virtual: VirtualModuleRegistry, dts: DtsRegistry): void {
   virtual.register('@ferry/enum', ENUM_BASE_RUNTIME);
   dts.register('@ferry/enum', ENUM_BASE_DTS);
+
+  // Pagination envelopes are type-only (no runtime), and the three shapes are fixed — so,
+  // like `@ferry/enum`, they're registered as concrete content rather than a placeholder.
+  virtual.register('@ferry/pagination', PLACEHOLDER_RUNTIME);
+  dts.register('@ferry/pagination', PAGINATION_BASE_DTS);
 
   for (const id of ['@ferry/route', '@ferry/pages', '@ferry/forms']) {
     virtual.register(id, PLACEHOLDER_RUNTIME);

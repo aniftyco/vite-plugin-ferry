@@ -495,6 +495,12 @@ export type ResourceFieldInfo = {
    * metadata, degrading with a warning when the relation or attribute can't be resolved. */
   relation?: string;
   attribute?: string;
+  /** True when a `Resource::collection(...)` argument looked like it could be a paginator
+   * (a bare variable, or a chain not ending in `paginate`/`simplePaginate`/`cursorPaginate`)
+   * but the kind couldn't be resolved statically. The field KEEPS its `Item[]` type (never
+   * degrades to `any`/`unknown`) — the caller pushes a warning instead, so a real paginator
+   * never silently mistypes as a plain array. */
+  paginatorUnresolved?: boolean;
 };
 
 export type ResourceArrayEntry = {
@@ -544,6 +550,121 @@ function containsWhenLoaded(node: PhpParserTypes.Node): boolean {
     }
   }
   return false;
+}
+
+/** The three Laravel paginator flavors ferry can type precisely, keyed to the method that
+ * produces them. */
+export type PaginatorKind = 'length-aware' | 'simple' | 'cursor';
+
+/** Method name -> paginator kind, for the three Laravel paginator constructors. */
+const PAGINATOR_METHODS: Record<string, PaginatorKind> = {
+  paginate: 'length-aware',
+  simplePaginate: 'simple',
+  cursorPaginate: 'cursor',
+};
+
+/**
+ * Detect the paginator kind a `Resource::collection(...)` argument's expression resolves to:
+ * whether the argument ITSELF is a direct call to `paginate`/`simplePaginate`/`cursorPaginate`.
+ * STRUCTURAL and shallow on purpose — a PHP method chain's outermost node is always the
+ * last-called method (`$q->where(...)->paginate()` is itself a `call` whose own offset name is
+ * `paginate`), so no recursion into the chain is needed, and none is done: a
+ * `paginate()`/etc. call nested inside a CLOSURE or a nested call's ARGUMENTS (e.g.
+ * `$this->whenLoaded('x', fn () => $q->paginate())`) is a different expression's result, not
+ * this argument's own shape, and must NOT be detected as this field's envelope. There is also
+ * no symbol table, so a typed `LengthAwarePaginator $p` variable passed as the arg is out of
+ * reach and resolves to `null` here (the caller warns and falls back to the plain array type).
+ */
+export function paginatorKindOfArgument(node: PhpParserTypes.Node): PaginatorKind | null {
+  if (node.kind !== 'call') return null;
+
+  const call = node as PhpParserTypes.Call;
+  if (call.what.kind !== 'propertylookup' && call.what.kind !== 'staticlookup') return null;
+
+  const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
+  const offset = lookup.offset;
+  const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+  return (name && PAGINATOR_METHODS[name]) || null;
+}
+
+/** Method names that resolve to a plain collection/value, never a paginator, so an unresolved
+ * `Resource::collection(...)` argument whose OWN outer call is one of these isn't flagged as a
+ * possible missed paginator. Two groups: the resource conditional-attribute helpers
+ * (`whenLoaded`, `when`, ...), and the common terminal Eloquent/Collection methods that always
+ * serialize as a plain array — `Resource::collection($query->get())` is idiomatic Laravel and
+ * correctly types as `Item[]`, not a paginator mistype worth warning about. */
+const NON_PAGINATOR_METHODS = new Set([
+  // Resource conditional-attribute helpers.
+  'whenLoaded',
+  'when',
+  'unless',
+  'whenHas',
+  'whenNotNull',
+  'whenNull',
+  'whenCounted',
+  'whenAggregated',
+  'whenExistsLoaded',
+  // Terminal Eloquent/Collection methods — always a plain collection, never a paginator.
+  'get',
+  'all',
+  'pluck',
+  'map',
+  'mapWithKeys',
+  'values',
+  'filter',
+  'reject',
+  'take',
+  'keyBy',
+  'toArray',
+  'toBase',
+  'sortBy',
+  'sortByDesc',
+  'unique',
+  'groupBy',
+  'each',
+  'collect',
+  'load',
+  'fresh',
+]);
+
+/**
+ * Whether a `Resource::collection(...)` argument that didn't resolve to a known paginator
+ * kind still LOOKS like it could be one — worth a build-time warning rather than a silent
+ * `Item[]` fallback. True for a bare variable (could hold anything, no symbol table to check)
+ * or a call/static-call chain whose own outer method isn't a recognized non-paginator method
+ * (a custom/unrecognized terminal call, which COULD be a home-grown paginator wrapper).
+ * False for a plain property read (`$this->orders`, `$user->orders`) — ordinary relation
+ * access, which Eloquent always serializes as a Collection, not a paginator — and false for a
+ * chain whose own outer call is a known non-paginator method (a resource conditional helper, or
+ * a terminal Eloquent/Collection method that always yields a plain collection).
+ */
+function looksLikePotentialPaginator(node: PhpParserTypes.Node): boolean {
+  if (node.kind === 'variable') return true;
+
+  if (node.kind === 'call') {
+    const call = node as PhpParserTypes.Call;
+    if (call.what.kind === 'propertylookup' || call.what.kind === 'staticlookup') {
+      const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
+      const offset = lookup.offset;
+      const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+      return !(name && NON_PAGINATOR_METHODS.has(name));
+    }
+    return true;
+  }
+
+  return false;
+}
+
+/** The `@ferry/pagination` generic type name for a detected paginator kind. */
+function paginatorEnvelopeTypeName(kind: PaginatorKind): string {
+  switch (kind) {
+    case 'length-aware':
+      return 'LengthAwarePaginated';
+    case 'simple':
+      return 'SimplePaginated';
+    case 'cursor':
+      return 'CursorPaginated';
+  }
 }
 
 /**
@@ -994,9 +1115,21 @@ export function inferTypeFromAstNode(
       if (resource === 'Collection') {
         return { type: 'any[]', optional };
       }
-      // Resource::collection returns Resource[] (array of resources)
+      // Resource::collection returns Resource[] — unless the argument resolves to one of
+      // Laravel's three paginators, in which case it returns the paginated envelope
+      // (`{ data, meta, links }`) instead of a bare array.
       if (method === 'collection') {
         if (resourceExists(resource, resourcesDir)) {
+          const arg = (call.arguments as PhpParserTypes.Node[] | undefined)?.[0];
+          if (arg) {
+            const kind = paginatorKindOfArgument(arg);
+            if (kind) {
+              return { type: `${paginatorEnvelopeTypeName(kind)}<${resource}>`, optional };
+            }
+            if (looksLikePotentialPaginator(arg)) {
+              return { type: `${resource}[]`, optional, paginatorUnresolved: true };
+            }
+          }
           return { type: `${resource}[]`, optional };
         }
         return { type: 'any[]', optional };

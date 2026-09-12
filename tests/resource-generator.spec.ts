@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { assembleAmbientTypes } from '../src/delivery/ambient-types.js';
 import { ENUM_BASE_DTS } from '../src/delivery/enum-base.js';
+import { PAGINATION_BASE_DTS } from '../src/delivery/pagination-base.js';
 import { generateEnumsDts } from '../src/generators/enums.js';
 import {
   RESOURCE_RUNTIME,
@@ -1223,6 +1224,110 @@ describe('a bare enum-name pin resolves to its value union end-to-end (tsc --noE
       // @ts-expect-error 'BOGUS' is outside the OrderStatusValue backing-value union.
       order.status = 'BOGUS';
     `;
+    const { ok, output } = typecheck(ambient, consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('Resource::collection(...) over a paginator emits the envelope, not Item[] (issue #27)', () => {
+  function scratch(): { dir: string; resourcesDir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'ferry-pagination-'));
+    const resourcesDir = join(dir, 'Resources');
+    mkdirSync(resourcesDir, { recursive: true });
+    return { dir, resourcesDir };
+  }
+
+  function writeOrderResource(resourcesDir: string, expr: string): void {
+    writeFileSync(
+      join(resourcesDir, 'UserResource.php'),
+      dedent`
+        <?php
+        namespace App\\Http\\Resources;
+        use Illuminate\\Http\\Resources\\Json\\JsonResource;
+        class UserResource extends JsonResource {
+            public function toArray($request): array { return ['id' => $this->id]; }
+        }
+      `,
+      'utf8'
+    );
+    writeFileSync(
+      join(resourcesDir, 'OrderResource.php'),
+      dedent`
+        <?php
+        namespace App\\Http\\Resources;
+        use Illuminate\\Http\\Resources\\Json\\JsonResource;
+        class OrderResource extends JsonResource {
+            public function toArray($request): array {
+                return ['users' => UserResource::collection(${expr})];
+            }
+        }
+      `,
+      'utf8'
+    );
+  }
+
+  function buildBlock(expr: string): { block: string; warnings: string[] } {
+    const { dir, resourcesDir } = scratch();
+    writeOrderResource(resourcesDir, expr);
+
+    const inputs = collectResourceInputs({
+      resourcesDir,
+      modelsDir: join(dir, 'Models'),
+      enumsDir: join(dir, 'Enums'),
+      cwd: dir,
+    });
+    const { resources, enumNames, warnings } = buildResources(inputs, {}, false);
+    return { block: generateResourcesDtsBlock(resources, enumNames), warnings };
+  }
+
+  it('emits LengthAwarePaginated<UserResource> for ->paginate(), importing @ferry/pagination', () => {
+    const { block, warnings } = buildBlock('$this->users()->paginate()');
+    expect(block).toContain('users: LengthAwarePaginated<UserResource>;');
+    expect(block).toContain(`import type { LengthAwarePaginated } from '@ferry/pagination';`);
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('emits SimplePaginated<UserResource> for ->simplePaginate()', () => {
+    const { block, warnings } = buildBlock('$this->users()->simplePaginate()');
+    expect(block).toContain('users: SimplePaginated<UserResource>;');
+    expect(block).toContain(`import type { SimplePaginated } from '@ferry/pagination';`);
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('emits CursorPaginated<UserResource> for ->cursorPaginate()', () => {
+    const { block, warnings } = buildBlock('$this->users()->cursorPaginate()');
+    expect(block).toContain('users: CursorPaginated<UserResource>;');
+    expect(block).toContain(`import type { CursorPaginated } from '@ferry/pagination';`);
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('falls back to UserResource[] and warns when the argument could be a paginator but the kind cannot be resolved', () => {
+    const { block, warnings } = buildBlock('$users');
+    expect(block).toContain('users: UserResource[];');
+    expect(block).not.toContain('@ferry/pagination');
+    expect(warnings.some((w) => w.includes('OrderResource.users') && w.includes('paginator kind'))).toBe(true);
+  });
+
+  it('proves the envelope is a real, checked shape — not any — via a negative tsc assertion', () => {
+    const { block } = buildBlock('$this->users()->paginate()');
+    const ambient = assembleAmbientTypes({ blocks: [PAGINATION_BASE_DTS, block] });
+
+    const consumer = dedent`
+      import type { OrderResource } from '@ferry/resources';
+      declare const order: OrderResource;
+
+      // The envelope's real shape: data/links/meta, not a bare array.
+      const total: number = order.users.meta.total;
+      const first: string | null = order.users.links.first;
+      const items: { id: string }[] = order.users.data;
+
+      // @ts-expect-error the envelope has no array indexing/length — it is NOT UserResource[].
+      // Were the field silently \`any\`, this directive would be unused and tsc would fail
+      // (TS2578); the positive .meta/.links/.data assertions above are what catch a degrade
+      // back to the old Item[] shape, since Item[] would compile the \`.length\` read too.
+      const bogus: string = order.users.length;
+    `;
+
     const { ok, output } = typecheck(ambient, consumer);
     expect(ok, `tsc reported errors:\n${output}`).toBe(true);
   });

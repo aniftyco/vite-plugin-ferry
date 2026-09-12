@@ -169,6 +169,17 @@ describe('createDelivery', () => {
     expect(delivery.load(`${VIRTUAL_PREFIX}@ferry/route`)).toBe('export {};\n');
   });
 
+  it('serves the fixed pagination envelopes at @ferry/pagination (issue #27)', () => {
+    const delivery = createDelivery('/tmp/project');
+
+    expect(delivery.resolveId('@ferry/pagination')).toBe(`${VIRTUAL_PREFIX}@ferry/pagination`);
+
+    const block = delivery.dts.render().find((b) => b.includes(`declare module '@ferry/pagination'`));
+    expect(block).toContain('export type LengthAwarePaginated<T>');
+    expect(block).toContain('export type SimplePaginated<T>');
+    expect(block).toContain('export type CursorPaginated<T>');
+  });
+
   it('does not resolve ids it has not registered', () => {
     const delivery = createDelivery('/tmp/project');
     expect(delivery.resolveId('@ferry/nope')).toBeNull();

@@ -25,6 +25,12 @@ const RESOURCES_MODULE_ID = '@ferry/resources';
 /** The module enum types are imported from inside the generated blocks. */
 const ENUMS_MODULE_ID = '@ferry/enums';
 
+/** The module the paginator envelope generics are imported from inside the generated blocks. */
+const PAGINATION_MODULE_ID = '@ferry/pagination';
+
+/** The fixed set of paginator envelope generics ferry emits from `@ferry/pagination`. */
+const PAGINATION_ENVELOPE_TYPES = ['LengthAwarePaginated', 'SimplePaginated', 'CursorPaginated'];
+
 /** The separate module-style file carrying the `@inertiajs/core` augmentation. */
 export const INERTIA_AUGMENTATION_FILE = 'inertia.d.ts';
 
@@ -468,6 +474,17 @@ function finalizeFields(
       out[field] = { type: fallback, optional: info.optional };
       continue;
     }
+
+    // A `Resource::collection(...)` argument that looked like it could be a paginator but
+    // couldn't be resolved statically: keep the `Item[]` type and warn instead of degrading.
+    if (info.paginatorUnresolved) {
+      warnings.push(
+        `${label}.${field}: Resource::collection() argument's paginator kind (paginate/simplePaginate/cursorPaginate) ` +
+          `could not be resolved statically; typed as \`${info.type}\`. If this is actually a paginator, ` +
+          `it will mistype unless the argument's method chain ends in one of those three calls.`
+      );
+    }
+
     out[field] = { type: info.type, optional: info.optional };
   }
 
@@ -587,6 +604,7 @@ function referenceImports(types: string[], knownResources: Set<string>, knownEnu
   const usedResources = new Set<string>();
   const usedEnums = new Set<string>();
   const usedEnumValues = new Set<string>();
+  const usedPagination = new Set<string>();
 
   for (const type of types) {
     for (const name of knownResources) if (typeReferences(type, name)) usedResources.add(name);
@@ -596,6 +614,9 @@ function referenceImports(types: string[], knownResources: Set<string>, knownEnu
       // that names only the union would otherwise go unimported and silently degrade to `any`.
       if (typeReferences(type, name)) usedEnums.add(name);
       if (typeReferences(type, `${name}Value`)) usedEnumValues.add(`${name}Value`);
+    }
+    for (const envelope of PAGINATION_ENVELOPE_TYPES) {
+      if (typeReferences(type, envelope)) usedPagination.add(envelope);
     }
   }
 
@@ -608,6 +629,9 @@ function referenceImports(types: string[], knownResources: Set<string>, knownEnu
   }
   if (usedEnumValues.size > 0) {
     lines.push(`import type { ${[...usedEnumValues].sort().join(', ')} } from '${ENUMS_MODULE_ID}';`);
+  }
+  if (usedPagination.size > 0) {
+    lines.push(`import type { ${[...usedPagination].sort().join(', ')} } from '${PAGINATION_MODULE_ID}';`);
   }
   return lines;
 }

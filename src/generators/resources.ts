@@ -27,6 +27,12 @@ export const RESOURCES_MODULE_ID = '@ferry/resources';
 /** The module enum types are imported from inside the resources d.ts block. */
 const ENUMS_MODULE_ID = '@ferry/enums';
 
+/** The module the paginator envelope generics are imported from inside the resources d.ts block. */
+const PAGINATION_MODULE_ID = '@ferry/pagination';
+
+/** The fixed set of paginator envelope generics ferry emits from `@ferry/pagination`. */
+const PAGINATION_ENVELOPE_TYPES = ['LengthAwarePaginated', 'SimplePaginated', 'CursorPaginated'];
+
 /** Resources are type-only, so the virtual module has no runtime — just a valid empty module. */
 export const RESOURCE_RUNTIME = 'export {};\n';
 
@@ -554,6 +560,17 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
       continue;
     }
 
+    // A `Resource::collection(...)` argument that looked like it could be a paginator but
+    // couldn't be resolved statically: keep the `Item[]` type (no silent mistype either way)
+    // and warn instead of degrading.
+    if (info.paginatorUnresolved) {
+      warnings.push(
+        `${resourceName}.${field}: Resource::collection() argument's paginator kind (paginate/simplePaginate/cursorPaginate) ` +
+          `could not be resolved statically; typed as \`${info.type}\`. If this is actually a paginator, ` +
+          `it will mistype unless the argument's method chain ends in one of those three calls.`
+      );
+    }
+
     // 5. Static type (includes enum names resolved from static casts).
     out[field] = { type: finalize(info.type, info, unionAddend), optional };
   }
@@ -732,6 +749,7 @@ export function generateResourcesDtsBlock(
   // resolving to `any`.
   const scanEnums = new Set([...enumNames, ...knownEnums]);
   const used = new Set<string>();
+  const usedPagination = new Set<string>();
   for (const name of names) {
     const entry = resources[name];
     if (entry.kind !== 'shape') continue;
@@ -739,12 +757,19 @@ export function generateResourcesDtsBlock(
       for (const enumName of scanEnums) {
         if (typeContainsName(field.type, `${enumName}Value`)) used.add(`${enumName}Value`);
       }
+      for (const envelope of PAGINATION_ENVELOPE_TYPES) {
+        if (typeContainsName(field.type, envelope)) usedPagination.add(envelope);
+      }
     }
   }
 
   const parts: string[] = [];
   if (used.size > 0) {
     parts.push(`import { ${[...used].sort().join(', ')} } from '${ENUMS_MODULE_ID}';`);
+    parts.push('');
+  }
+  if (usedPagination.size > 0) {
+    parts.push(`import type { ${[...usedPagination].sort().join(', ')} } from '${PAGINATION_MODULE_ID}';`);
     parts.push('');
   }
   parts.push(names.map((name) => renderResourceType(name, resources[name])).join('\n\n'));

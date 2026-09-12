@@ -59,7 +59,7 @@ form.errors['profile.bio'];  // error keys derived from the shape
 
 - **[Routes](docs/routes.md)** (`@ferry/route`): a typed `route()` helper that resolves named routes to their URL and method client-side, with zero route table shipped to the browser.
 - **[Enums](docs/enums.md)** (`@ferry/enum`, `@ferry/enums`): PHP enums become real JS classes with `is`/`from`/`fromOrFail`/`values`/`keys`/`cases`/`options`, plus a `<Enum>Value` backing-value union for serialized data.
-- **[Resources](docs/resources.md)** (`@ferry/resources`): precise types for your `JsonResource` classes from static `toArray()` analysis plus real column and cast metadata, degrading gracefully instead of breaking your build.
+- **[Resources](docs/resources.md)** (`@ferry/resources`, `@ferry/pagination`): precise types for your `JsonResource` classes from static `toArray()` analysis plus real column and cast metadata, degrading gracefully instead of breaking your build. `Resource::collection()` over a paginator types as the real `{ data, links, meta }` envelope.
 - **[Page props](docs/page-props.md)** (`@ferry/pages`): the props each Inertia page receives, typed through `usePage<T>()`, with shared props typed through Inertia's own augmentation.
 - **[Form types](docs/forms.md)** (`@ferry/forms`): the data shape of your `FormRequest` classes, typed through `useForm<T>()` with `form.errors` keys derived for free.
 
