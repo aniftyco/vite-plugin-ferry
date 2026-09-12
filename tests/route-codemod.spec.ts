@@ -128,30 +128,15 @@ describe('transformRoutes', () => {
     expect(out?.code).toContain(`route('/users/{user}', { user: 1 }, 'delete')`);
   });
 
-  it('appends .url for a route<string> call', () => {
-    const out = run(`const u = route<string>('users.show', { user: 1 });`);
-    expect(out?.code).toContain(`route<string>('/users/{user}', { user: 1 }, 'get').url`);
-  });
-
-  it('appends .url for a route call with a string-literal type argument', () => {
-    const out = run(`const u = route<'fixed'>('users.show', { user: 1 });`);
-    expect(out?.code).toContain(`route<'fixed'>('/users/{user}', { user: 1 }, 'get').url`);
-  });
-
-  it('appends .url for a route call with an aliased string type argument', () => {
-    const out = run(`type Alias = string;\nconst u = route<Alias>('users.show', { user: 1 });`);
-    expect(out?.code).toContain(`route<Alias>('/users/{user}', { user: 1 }, 'get').url`);
-  });
-
-  it('does not append .url for a plain route call with no type argument', () => {
+  it('does not append .url for a plain route call — the value is string-usable directly', () => {
     const out = run(`const u = route('users.show', { user: 1 });`);
     expect(out?.code).toContain(`route('/users/{user}', { user: 1 }, 'get')`);
     expect(out?.code).not.toContain(`.url`);
   });
 
-  it('never appends .url for a route.isCurrent call carrying a type argument', () => {
-    const out = run(`const active = route.isCurrent<'users.show'>('users.show');`);
-    expect(out?.code).toContain(`route.isCurrent<'users.show'>('/users/{user}')`);
+  it('leaves a leftover type argument inert and never appends .url', () => {
+    const out = run(`const u = route<string>('users.show', { user: 1 });`);
+    expect(out?.code).toContain(`route<string>('/users/{user}', { user: 1 }, 'get')`);
     expect(out?.code).not.toContain(`.url`);
   });
 
@@ -159,25 +144,25 @@ describe('transformRoutes', () => {
     expect(() => run(`route(name);`)).toThrow(RouteCodemodError);
   });
 
-  it('throws a build error for a non-literal isCurrent pattern', () => {
-    expect(() => run(`route.isCurrent(name);`)).toThrow(RouteCodemodError);
+  it('throws a build error for a non-literal is pattern', () => {
+    expect(() => run(`route.is(name);`)).toThrow(RouteCodemodError);
   });
 
-  it('rewrites an exact isCurrent name to its pattern', () => {
-    const out = run(`route.isCurrent('users.show');`);
-    expect(out?.code).toContain(`route.isCurrent('/users/{user}')`);
+  it('rewrites an exact route.is name to its pattern', () => {
+    const out = run(`route.is('users.show');`);
+    expect(out?.code).toContain(`route.is('/users/{user}')`);
   });
 
-  it('expands a wildcard isCurrent to the matching patterns', () => {
+  it('expands a wildcard route.is to the matching patterns', () => {
     // Patterns are deduped in sorted-route-name order; users.destroy and users.show
     // share '/users/{user}', so it appears once, before users.index's '/users'.
-    const out = run(`route.isCurrent('users.*');`);
-    expect(out?.code).toContain(`route.isCurrent(['/users/{user}', '/users'])`);
+    const out = run(`route.is('users.*');`);
+    expect(out?.code).toContain(`route.is(['/users/{user}', '/users'])`);
   });
 
   it('warns and emits false for a zero-match wildcard', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const out = run(`const active = route.isCurrent('bogus.*');`);
+    const out = run(`const active = route.is('bogus.*');`);
     expect(out?.code).toContain(`const active = false;`);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
@@ -192,12 +177,33 @@ describe('transformRoutes', () => {
       bigTable[name] = { name, uri: `/reports/${i}`, method: 'get', params: [] };
     }
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const out = transformRoutes(`route.isCurrent('reports.*');`, '/project/src/app.tsx', bigTable);
+    const out = transformRoutes(`route.is('reports.*');`, '/project/src/app.tsx', bigTable);
     expect(warn).toHaveBeenCalled();
     // The expansion still ships every matched pattern (this is a warning, not a bail).
     expect(out?.code).toContain(`'/reports/0'`);
     expect(out?.code).toContain(`'/reports/29'`);
     warn.mockRestore();
+  });
+
+  it('resolves an array of route names to a flat array of patterns', () => {
+    const out = run(`route.is(['users.show', 'users.index']);`);
+    expect(out?.code).toContain(`route.is(['/users/{user}', '/users'])`);
+  });
+
+  it('flattens an array of wildcards into every matched pattern', () => {
+    const out = run(`route.is(['users.*', 'admin.users.*']);`);
+    // users.* -> '/users/{user}' (shared by show + destroy), '/users'; admin.users.* -> '/admin/users/{user}'
+    expect(out?.code).toContain(`route.is(['/users/{user}', '/users', '/admin/users/{user}'])`);
+  });
+
+  it('resolves a mix of names and wildcards, deduping shared patterns', () => {
+    const out = run(`route.is(['users.show', 'users.*']);`);
+    // users.show and the users.* expansion both include '/users/{user}' — it appears once.
+    expect(out?.code).toContain(`route.is(['/users/{user}', '/users'])`);
+  });
+
+  it('throws a build error for a non-literal element in the array form', () => {
+    expect(() => run(`route.is([name]);`)).toThrow(RouteCodemodError);
   });
 
   it('injects the resolver import exactly once', () => {

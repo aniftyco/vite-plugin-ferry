@@ -41,7 +41,7 @@ const label = 'show';
 </script>
 <template>
   <a :href="route('users.show', { user: 1 })">{{ label }}</a>
-  <span v-if="route.isCurrent('users.*')">active</span>
+  <span v-if="route.is('users.*')">active</span>
 </template>
 `;
 
@@ -49,7 +49,7 @@ const label = 'show';
     const code = compileVueTemplate(source);
     // Guards the codemod's core assumption: an unqualified template `route` becomes `_ctx.route`.
     expect(code).toContain(`_ctx.route('users.show', { user: 1 })`);
-    expect(code).toContain(`_ctx.route.isCurrent('users.*')`);
+    expect(code).toContain(`_ctx.route.is('users.*')`);
   });
 
   it('rewrites the compiled template (?vue&type=template sub-request, build form)', () => {
@@ -57,7 +57,7 @@ const label = 'show';
     const out = transformRoutesPost(code, '/a/Comp.vue?vue&type=template&lang.js', table);
 
     expect(out?.code).toContain(`route('/users/{user}', { user: 1 }, 'get')`);
-    expect(out?.code).toContain(`route.isCurrent(['/users/{user}', '/users'])`);
+    expect(out?.code).toContain(`route.is(['/users/{user}', '/users'])`);
     // _ctx.route is normalized to the imported bare route so ferry's resolver is the callee.
     expect(out?.code).not.toContain('_ctx.route');
     expect(out?.code.startsWith(`import { route } from '@ferry/route';`)).toBe(true);
@@ -70,7 +70,7 @@ const label = 'show';
     const out = transformRoutesPost(code, '/a/Comp.vue', table);
 
     expect(out?.code).toContain(`route('/users/{user}', { user: 1 }, 'get')`);
-    expect(out?.code).toContain(`route.isCurrent(['/users/{user}', '/users'])`);
+    expect(out?.code).toContain(`route.is(['/users/{user}', '/users'])`);
     expect(out?.code).not.toContain('_ctx.route');
   });
 
@@ -117,7 +117,7 @@ describe('Svelte: real svelte/compiler output through the post pass', () => {
   const source = `<script>
 </script>
 <a href={route('users.show', { user: 1 })}>show</a>
-{#if route.isCurrent('users.*')}<span>active</span>{/if}
+{#if route.is('users.*')}<span>active</span>{/if}
 `;
 
   function compile(src: string): string {
@@ -127,15 +127,15 @@ describe('Svelte: real svelte/compiler output through the post pass', () => {
   it('compiles markup route() calls to bare identifiers (the shape the codemod expects)', () => {
     const code = compile(source);
     expect(code).toContain(`route('users.show', { user: 1 })`);
-    expect(code).toContain(`route.isCurrent('users.*')`);
+    expect(code).toContain(`route.is('users.*')`);
   });
 
-  it('rewrites route() and route.isCurrent() in the compiled component, injecting the import once', () => {
+  it('rewrites route() and route.is() in the compiled component, injecting the import once', () => {
     const code = compile(source);
     const out = transformRoutesPost(code, '/a/Comp.svelte', table);
 
     expect(out?.code).toContain(`route('/users/{user}', { user: 1 }, 'get')`);
-    expect(out?.code).toContain(`route.isCurrent(['/users/{user}', '/users'])`);
+    expect(out?.code).toContain(`route.is(['/users/{user}', '/users'])`);
     const occurrences = out?.code.match(/@ferry\/route/g) ?? [];
     expect(occurrences).toHaveLength(1);
     expect(out?.code.startsWith(`import { route } from '@ferry/route';`)).toBe(true);

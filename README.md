@@ -48,7 +48,8 @@ import type { StoreUserRequest } from '@ferry/forms';
 const page = usePage<UsersShowProps>();
 page.props.user;             // UserResource
 
-const href = route('users.show', { user: 1 }); // typed name, resolves to { url, method }
+const href = route('users.show', { user: 1 }); // usable as a string AND as Inertia's { url, method }
+route.is('users.*');                            // current-route check: name, wildcard, or an array of either
 
 const form = useForm<StoreUserRequest>({ name: '', role: 'admin' });
 form.data.role;              // 'admin' | 'editor' | 'viewer'

@@ -145,27 +145,21 @@ function routeCallee(node: Node): { start: number; end: number; normalize: boole
 }
 
 /**
- * A `route.isCurrent(...)` call. Matches the bare `route.isCurrent(...)` AND the Vue
- * compiled-template form `_ctx.route.isCurrent(...)`. Returns the span of the `route`
- * receiver to normalize to the bare `route` identifier, plus whether that is needed.
+ * A `route.is(...)` call. Matches the bare `route.is(...)` AND the Vue compiled-template
+ * form `_ctx.route.is(...)`. Returns the span of the `route` receiver to normalize to the
+ * bare `route` identifier, plus whether that normalization is needed.
  */
-function isCurrentCallee(node: Node): { start: number; end: number; normalize: boolean } | null {
-  if (node.type !== 'CallExpression' || !isNamedMember(node.callee, 'isCurrent')) return null;
+function isCallee(node: Node): { start: number; end: number; normalize: boolean } | null {
+  if (node.type !== 'CallExpression' || !isNamedMember(node.callee, 'is')) return null;
   const obj = node.callee.object;
   if (obj?.type === 'Identifier' && obj.name === 'route') {
     return { start: obj.start, end: obj.end, normalize: false };
   }
-  // `_ctx.route.isCurrent(...)` — Vue's compiled binding.
+  // `_ctx.route.is(...)` — Vue's compiled binding.
   if (isNamedMember(obj, 'route') && obj.object?.type === 'Identifier' && obj.object.name === '_ctx') {
     return { start: obj.start, end: obj.end, normalize: true };
   }
   return null;
-}
-
-/** Whether the call carries ANY explicit type argument (`route<...>(...)`). */
-function hasTypeArg(node: Node): boolean {
-  const params = node.typeArguments?.params;
-  return Array.isArray(params) && params.length > 0;
 }
 
 /** Route names matched by a wildcard: `users.*` → names under `users.`; `*` → all. */
@@ -176,14 +170,35 @@ function matchWildcard(table: RouteTable, prefix: string): string[] {
 }
 
 /**
+ * Resolve a single `route.is` operand — a route name or a `prefix.*` / `*` wildcard — to its
+ * URI pattern(s). A name yields its one URI; a wildcard yields every matched route's URI. The
+ * flags let callers warn/skip: `unsupported` for a non-trailing wildcard, `unknown` for a
+ * name or wildcard that matched nothing.
+ */
+function resolvePatterns(
+  table: RouteTable,
+  value: string
+): { patterns: string[]; unsupported?: boolean; unknown?: boolean } {
+  if (value.includes('*')) {
+    if (value !== '*' && !value.endsWith('.*')) return { patterns: [], unsupported: true };
+    const prefix = value === '*' ? '' : value.slice(0, -2);
+    const patterns = [...new Set(matchWildcard(table, prefix).map((name) => table[name].uri))];
+    if (patterns.length === 0) return { patterns: [], unknown: true };
+    return { patterns };
+  }
+  const entry = table[value];
+  if (!entry) return { patterns: [], unknown: true };
+  return { patterns: [entry.uri] };
+}
+
+/**
  * The core rewrite, shared by the pre and post passes: rewrites literal `route('name', ...)`
- * and `route.isCurrent(...)` calls so the URI PATTERN (and, for `route()`, the HTTP method)
- * arrive inline, appends `.url` for any `route<...>(...)` call whose type argument survives (pre
- * pass only — types are stripped by the post pass), and injects the resolver import. Vue's
- * compiled `_ctx.route(...)` / `_ctx.route.isCurrent(...)` bindings are normalized to the
- * imported `route` so they resolve through ferry too. The full route table never ships — only
- * referenced routes' patterns end up in the output. Returns `null` when nothing changed.
- * Assumes the id gate + cheap bail already ran.
+ * and `route.is(...)` calls so the URI PATTERN (and, for `route()`, the HTTP method)
+ * arrive inline, and injects the resolver import. Vue's compiled `_ctx.route(...)` /
+ * `_ctx.route.is(...)` bindings are normalized to the imported `route` so they resolve
+ * through ferry too. The full route table never ships — only referenced routes' patterns end
+ * up in the output. Returns `null` when nothing changed. Assumes the id gate + cheap bail
+ * already ran.
  *
  * @throws RouteCodemodError on a non-literal route name (protects the no-leak guarantee).
  */
@@ -239,75 +254,110 @@ function rewrite(code: string, id: string, table: RouteTable, lang: OxcLang): { 
         s.appendLeft(args[args.length - 1].end, `, '${entry.method}'`);
       }
 
-      // route<...>(...) with any type argument -> a real string at runtime
-      if (hasTypeArg(node)) {
-        s.appendRight(node.end, '.url');
-      }
-
       changed = true;
       usedRoute = true;
       return;
     }
 
-    const isCurrent = isCurrentCallee(node);
-    if (isCurrent) {
+    const is = isCallee(node);
+    if (is) {
       const args = node.arguments ?? [];
       const arg = args[0];
       if (!arg) return;
 
-      if (!isStringLiteral(arg)) {
-        throw buildError(
-          node,
-          'route.isCurrent() requires a literal pattern; a non-literal pattern cannot be resolved at build time'
-        );
-      }
+      // Array form: `route.is(['users.show', 'admin.*'])` — resolve every element to its URI
+      // pattern(s) and flatten to one array. A bad element is skipped (warned), not fatal.
+      if (arg.type === 'ArrayExpression') {
+        const patterns: string[] = [];
+        for (const el of arg.elements ?? []) {
+          if (!isStringLiteral(el)) {
+            throw buildError(
+              node,
+              'route.is() requires literal route names/patterns; a non-literal cannot be resolved at build time'
+            );
+          }
+          const resolved = resolvePatterns(table, el.value);
+          if (resolved.unsupported) {
+            logWarn('routes', `Unsupported wildcard '${el.value}' (only trailing 'prefix.*' is supported) — skipping`);
+          } else if (resolved.unknown) {
+            logWarn('routes', `Unknown route name/wildcard '${el.value}' in route.is() — skipping`);
+          }
+          patterns.push(...resolved.patterns);
+        }
 
-      // `_ctx.route.isCurrent` -> `route.isCurrent`, so the injected resolver is used.
-      if (isCurrent.normalize) {
-        s.update(isCurrent.start, isCurrent.end, 'route');
-      }
+        // `_ctx.route.is` -> `route.is`, so the injected resolver is used.
+        if (is.normalize) {
+          s.update(is.start, is.end, 'route');
+        }
 
-      const value = arg.value;
-
-      if (value.includes('*')) {
-        if (value !== '*' && !value.endsWith('.*')) {
-          logWarn('routes', `Unsupported wildcard '${value}' (only trailing 'prefix.*' is supported) — emitting false`);
+        const unique = [...new Set(patterns)];
+        if (unique.length === 0) {
+          logWarn('routes', `route.is([...]) matched no routes (likely a typo) — emitting false`);
           s.update(node.start, node.end, 'false');
           changed = true;
           return;
         }
 
-        const prefix = value === '*' ? '' : value.slice(0, -2);
-        const matched = matchWildcard(table, prefix);
-        const patterns = [...new Set(matched.map((name) => table[name].uri))];
-
-        if (patterns.length === 0) {
-          logWarn('routes', `Wildcard '${value}' matched no routes (likely a typo) — emitting false`);
-          s.update(node.start, node.end, 'false');
-          changed = true;
-          return;
-        }
-
-        if (patterns.length > BROAD_WILDCARD_THRESHOLD) {
+        if (unique.length > BROAD_WILDCARD_THRESHOLD) {
           logWarn(
             'routes',
-            `Wildcard '${value}' matched ${patterns.length} routes — that many URI patterns ship to the client`
+            `route.is([...]) matched ${unique.length} routes — that many URI patterns ship to the client`
           );
         }
 
-        s.update(arg.start, arg.end, `[${patterns.map((p) => `'${p}'`).join(', ')}]`);
+        s.update(arg.start, arg.end, `[${unique.map((p) => `'${p}'`).join(', ')}]`);
         changed = true;
         usedRoute = true;
         return;
       }
 
-      const entry = table[value];
-      if (!entry) {
-        logWarn('routes', `Unknown route name '${value}' in route.isCurrent() — leaving call unchanged`);
+      if (!isStringLiteral(arg)) {
+        throw buildError(
+          node,
+          'route.is() requires a literal pattern; a non-literal pattern cannot be resolved at build time'
+        );
+      }
+
+      // `_ctx.route.is` -> `route.is`, so the injected resolver is used.
+      if (is.normalize) {
+        s.update(is.start, is.end, 'route');
+      }
+
+      const value = arg.value;
+      const resolved = resolvePatterns(table, value);
+
+      if (resolved.unsupported) {
+        logWarn('routes', `Unsupported wildcard '${value}' (only trailing 'prefix.*' is supported) — emitting false`);
+        s.update(node.start, node.end, 'false');
+        changed = true;
         return;
       }
 
-      s.update(arg.start, arg.end, `'${entry.uri}'`);
+      if (resolved.unknown) {
+        // A bare wildcard that matched nothing is a likely typo -> false; a bare name that is
+        // unknown is left unchanged (it may be resolved by another tool).
+        if (value.includes('*')) {
+          logWarn('routes', `Wildcard '${value}' matched no routes (likely a typo) — emitting false`);
+          s.update(node.start, node.end, 'false');
+          changed = true;
+        } else {
+          logWarn('routes', `Unknown route name '${value}' in route.is() — leaving call unchanged`);
+        }
+        return;
+      }
+
+      // A wildcard resolves to an array of patterns; a single name to its one URI string.
+      if (value.includes('*')) {
+        if (resolved.patterns.length > BROAD_WILDCARD_THRESHOLD) {
+          logWarn(
+            'routes',
+            `Wildcard '${value}' matched ${resolved.patterns.length} routes — that many URI patterns ship to the client`
+          );
+        }
+        s.update(arg.start, arg.end, `[${resolved.patterns.map((p) => `'${p}'`).join(', ')}]`);
+      } else {
+        s.update(arg.start, arg.end, `'${resolved.patterns[0]}'`);
+      }
       changed = true;
       usedRoute = true;
       return;
@@ -330,7 +380,6 @@ function rewrite(code: string, id: string, table: RouteTable, lang: OxcLang): { 
 
 /**
  * PRE pass (`enforce: 'pre'`): rewrites real source modules — React/JSX and plain TS/JS.
- * TS types are intact here, so `route<...>(...)` gets the `.url` sugar.
  */
 export function transformRoutes(code: string, id: string, table: RouteTable): { code: string; map: any } | null {
   if (!shouldTransformPre(id)) return null;
@@ -341,9 +390,7 @@ export function transformRoutes(code: string, id: string, table: RouteTable): { 
 
 /**
  * POST pass (`enforce: 'post'`): rewrites framework-compiled Vue/Svelte modules, after
- * their plugins compile the component and esbuild strips TS. Same rewriting as the pre
- * pass MINUS the `route<...>` → `.url` sugar — there is no type argument left to detect
- * at this stage, so that sugar is inherently React/TS-only.
+ * their plugins compile the component and esbuild strips TS.
  */
 export function transformRoutesPost(code: string, id: string, table: RouteTable): { code: string; map: any } | null {
   if (!shouldTransformPost(id)) return null;

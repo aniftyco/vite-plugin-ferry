@@ -88,8 +88,8 @@ describe('build-failing throws ignore the gate', () => {
 
   it('still throws at silent (the gate never swallows exceptions)', () => {
     setVerbosity('silent');
-    // A non-literal route.isCurrent() name is a build-failing error.
-    expect(() => transformRoutes(`route.isCurrent(name);`, '/project/src/app.tsx', table)).toThrow(RouteCodemodError);
+    // A non-literal route.is() name is a build-failing error.
+    expect(() => transformRoutes(`route.is(name);`, '/project/src/app.tsx', table)).toThrow(RouteCodemodError);
   });
 });
 

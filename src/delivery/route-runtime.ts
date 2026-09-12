@@ -6,9 +6,10 @@
  *
  * Signature at runtime: `route(pattern, params, method)`. The codemod guarantees
  * `pattern` is a literal URI (e.g. `/users/{user}`), always emits the `params` slot
- * (`undefined` when absent), and appends the lowercased `method`. `route.isCurrent`
+ * (`undefined` when absent), and appends the lowercased `method`. `route.is`
  * takes a single pattern or an array of patterns (the codemod expands a wildcard to
- * the matching routes' patterns at build time).
+ * the matching routes' patterns at build time, and resolves an array of route names
+ * / wildcards to a flat array of patterns).
  */
 export const ROUTE_RUNTIME = `function fill(pattern, params) {
   const values = { ...(params || {}) };
@@ -52,19 +53,13 @@ function toRegExp(pattern) {
 
 export function route(pattern, params, method) {
   const url = fill(pattern, params);
-  return {
-    url,
-    method,
-    toString() {
-      return this.url;
-    },
-    [Symbol.toPrimitive]() {
-      return this.url;
-    },
-  };
+  // A boxed String: natively a string (all string methods, template literals, JSON) that
+  // also carries { url, method }, so Inertia's isUrlMethodPair guard sees an object with
+  // own url/method and reads the HTTP verb.
+  return Object.assign(new String(url), { url, method });
 }
 
-route.isCurrent = function isCurrent(patternOrPatterns, params) {
+route.is = function is(patternOrPatterns, params) {
   if (typeof window === 'undefined' || !window.location) return false;
   const path = window.location.pathname;
   // Exact pattern + params -> this route, THIS param: fill the pattern and compare the

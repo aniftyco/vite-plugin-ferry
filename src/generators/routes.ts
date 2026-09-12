@@ -145,7 +145,7 @@ export function wildcardPrefixes(names: string[]): string[] {
 /**
  * The script-style top-level declarations for `@ferry/route`: the static helper
  * types, the generated `FerryRoutes` interface and `FerryRouteWildcard` union, the
- * `route` function, and the `route.isCurrent` namespace. These are TOP-LEVEL ambient
+ * `route` function, and the `route.is` namespace. These are TOP-LEVEL ambient
  * declarations (not a `declare module` block) so `route` is globally available; the
  * block contains no top-level import/export, keeping the ambient file a script.
  */
@@ -165,14 +165,14 @@ export function generateRoutesDts(table: RouteTable): string {
     `type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';`,
     `type QueryValue = string | number | boolean | null | undefined | Array<string | number>;`,
     `type QueryBag = Record<string, QueryValue>;`,
-    `type RouteResult = {\n  url: string;\n  method: HttpMethod;\n  toString(): string;\n  [Symbol.toPrimitive](hint: string): string;\n};`,
+    // A boxed String at runtime: usable as a plain `string` (all string methods, template
+    // literals, JSON) AND as Inertia's `{ url, method }` pair. `method` MUST be the full
+    // HttpMethod union so the value stays assignable to Inertia's `UrlMethodPair`.
+    `type RouteResult = string & { url: string; method: HttpMethod };`,
     ferryRoutes,
     wildcard,
     [
-      `declare function route<`,
-      `  R extends string | RouteResult = RouteResult,`,
-      `  K extends keyof FerryRoutes = keyof FerryRoutes,`,
-      `>(`,
+      `declare function route<K extends keyof FerryRoutes = keyof FerryRoutes>(`,
       `  name: K,`,
       // Require a params argument only when the route has at least one REQUIRED param.
       // `{} extends FerryRoutes[K]` holds when every param is optional (or there are none),
@@ -180,17 +180,15 @@ export function generateRoutesDts(table: RouteTable): string {
       `  ...args: {} extends FerryRoutes[K]`,
       `    ? [params?: FerryRoutes[K] & QueryBag]`,
       `    : [params: FerryRoutes[K] & QueryBag]`,
-      // Any string-subtype type argument yields a string (the codemod appends `.url` whenever
-      // a type argument is present): `route<string>`, `route<'fixed'>`, or an alias resolving
-      // to string. The default (no type arg) is RouteResult; a non-string type argument fails
-      // the `extends string | RouteResult` constraint. The return widens to `string`, never
-      // the echoed literal — matching what the codemod actually rewrites.
-      `): R extends string ? string : RouteResult;`,
+      // A single return type, always `RouteResult`: a value usable as a plain string, as
+      // Inertia's `{ url, method }` pair, and in template literals — one call, everywhere.
+      `): RouteResult;`,
     ].join('\n'),
     [
       `declare namespace route {`,
-      `  function isCurrent<K extends keyof FerryRoutes>(name: K, params?: FerryRoutes[K]): boolean;`,
-      `  function isCurrent(pattern: FerryRouteWildcard): boolean;`,
+      `  function is<K extends keyof FerryRoutes>(name: K, params?: FerryRoutes[K]): boolean;`,
+      `  function is(pattern: FerryRouteWildcard): boolean;`,
+      `  function is(patterns: Array<keyof FerryRoutes | FerryRouteWildcard>): boolean;`,
       `}`,
     ].join('\n'),
   ].join('\n\n');

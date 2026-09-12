@@ -56,7 +56,12 @@ describe('generated route types (tsc --noEmit consumer check)', () => {
   it('accepts valid calls and rejects invalid ones in a single pass', () => {
     // Each `@ts-expect-error` both requires the next line to error AND fails tsc if it
     // does not, so one clean pass proves valid usages compile and invalid ones are caught.
+    // Inertia's UrlMethodPair (@inertiajs/core) and the <Link href> type it feeds. The single
+    // route() return must be assignable to a plain string, to UrlMethodPair, and to their union.
     const consumer = `
+      type UrlMethodPair = { url: string; method: HttpMethod; component?: string | Record<string, string> };
+      type LinkHref = string | UrlMethodPair;
+
       route('users.show', { user: 1 });
       route('users.index');
       route('users.index', { page: 2 });
@@ -64,21 +69,30 @@ describe('generated route types (tsc --noEmit consumer check)', () => {
       // & QueryBag must suppress excess-property errors on object literals (PLAN line ~125):
       route('users.show', { user: 1, tab: 'a' });
 
-      // No type argument -> RouteResult (an object, coerced via toString in string contexts).
-      const r = route('users.show', { user: 1 });
-      const rr: RouteResult = route('users.index');
+      // One return type, usable as a plain string...
+      const s: string = route('users.show', { user: 1 });
+      // ...as Inertia's { url, method } pair...
+      const p: UrlMethodPair = route('users.show', { user: 1 });
+      // ...and as the <Link href> union.
+      const h: LinkHref = route('users.show', { user: 1 });
+
+      // String methods resolve on the value directly (it is a real string).
+      const starts: boolean = route('users.show', { user: 1 }).startsWith('/');
+
+      // The url/method members are typed.
+      const r: RouteResult = route('users.show', { user: 1 });
       const m: HttpMethod = r.method;
       const u: string = r.url;
 
-      // Any string-subtype type argument -> a real string return.
-      const str: string = route<string>('users.show', { user: 1 });
-      const fixed: string = route<'fixed'>('users.show', { user: 1 });
-      type Alias = string;
-      const aliased: string = route<Alias>('users.show', { user: 1 });
+      const active: boolean = route.is('users.show');
+      route.is('users.show', { user: 1 });
+      route.is('users.*');
+      route.is('admin.users.*');
 
-      const active: boolean = route.isCurrent('users.show');
-      route.isCurrent('users.*');
-      route.isCurrent('admin.users.*');
+      // array form: names, wildcards, and a mix — matches if the current route is ANY of them.
+      const anyOf: boolean = route.is(['users.show', 'users.index']);
+      route.is(['users.*', 'admin.users.*']);
+      route.is(['users.show', 'admin.users.*']);
 
       // an all-optional-param route accepts no params argument...
       route('archive');
@@ -90,9 +104,11 @@ describe('generated route types (tsc --noEmit consumer check)', () => {
       // @ts-expect-error unknown route name
       route('nope.name');
       // @ts-expect-error bogus wildcard prefix
-      route.isCurrent('bogus.*');
-      // @ts-expect-error a non-string type argument fails the extends-string constraint
-      route<number>('users.show', { user: 1 });
+      route.is('bogus.*');
+      // @ts-expect-error an unknown name in the array form is rejected
+      route.is(['users.show', 'nope.name']);
+      // @ts-expect-error negative control: method is not a number
+      const wrong: number = route('users.show', { user: 1 }).method;
     `;
 
     const { ok, output } = typecheck(consumer);

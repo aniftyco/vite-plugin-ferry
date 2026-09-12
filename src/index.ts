@@ -110,7 +110,7 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
       return delivery.load(id);
     },
 
-    // Rewrite literal route() / route.isCurrent() calls: name -> URI pattern, inject
+    // Rewrite literal route() / route.is() calls: name -> URI pattern, inject
     // the resolver import, and keep the full route table out of the browser bundle.
     transform(code, id) {
       return transformRoutes(code, id, routeTable);

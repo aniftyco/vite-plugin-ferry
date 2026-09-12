@@ -11,29 +11,35 @@
 Route::get('/users/{user}', [UserController::class, 'show'])->name('users.show');
 ```
 
+One call works everywhere. `route()` returns a value that is a plain `string` **and** Inertia's `{ url, method }` pair at once, so the same call drops into `<Link href>`, `router.delete`, a template literal, or anywhere a string is expected — no type argument, no `.url`.
+
 ```tsx
 const href = route('users.show', { user: 1 });
 // build-time codemod rewrites the call to:
 route('/users/{user}', { user: 1 }, 'get')
-// runtime resolves to: { url: '/users/1', method: 'get' }
+// runtime resolves to a value usable as '/users/1' AND as { url: '/users/1', method: 'get' }
 
-<Link href={route('users.show', { user: 1 })} />       // Link reads { url, method } directly
-route('users.destroy', { user: 1 })                      // { url, method } for router.delete / form.submit
-`Visit ${route('users.show', { user: 1 })}`              // template literal: coerces via toString() to '/users/1'
-route<string>('users.show', { user: 1 })                // explicit string: '/users/1'
-route('users.index', { page: 2 })                        // extra keys become the query string: '/users?page=2'
+<Link href={route('users.show', { user: 1 })} />       // Link reads { url, method } directly — the HTTP method travels with the value
+router.delete(route('users.destroy', { user: 1 }))     // the 'delete' verb rides along, no extra props
+`Visit ${route('users.show', { user: 1 })}`            // template literal: '/users/1'
+route('users.show', { user: 1 }).startsWith('/users')  // it is a real string, so string methods work
+route('users.index', { page: 2 })                       // extra keys become the query string: '/users?page=2'
 ```
 
-Any string-typed type argument works the same way. A string literal (`route<'fixed'>(...)`) or a type alias resolving to `string` both return a real `string` and get the `.url` sugar. A non-string type argument (`route<number>(...)`) is a type error.
+Because the method travels with the value, non-GET links stay ergonomic: passing a `route()` result straight to `<Link>` or `router.*` carries the right HTTP verb into Inertia with no extra props.
 
 ## Current-route checks
 
-`route.isCurrent()` works the same way, with route-name prefixes validated at compile time:
+`route.is()` reports whether a route is the current one, with route-name prefixes validated at compile time. It accepts a single name, a wildcard, or an array of either (matching if the current route is any of them):
 
 ```tsx
-route.isCurrent('users.show', { user: 1 });  // this route, this user
-route.isCurrent('users.*');                  // any users.* route active (nav highlighting)
+route.is('users.show', { user: 1 });          // this route, this user
+route.is('users.*');                          // any users.* route active (nav highlighting)
+route.is(['users.show', 'posts.index']);      // true on either route
+route.is(['users.*', 'admin.*']);             // true under either section
 ```
+
+The array form matches at the name/pattern level only — pass params to the single-name form when you need to match a concrete param.
 
 ## Scoped bindings
 
@@ -46,7 +52,7 @@ Route::get('posts/{post:slug}/edit', [PostController::class, 'edit'])->scopeBind
 
 ```tsx
 route('post.edit', { post: 'hello-world' });            // '/posts/hello-world/edit'
-route.isCurrent('post.edit', { post: 'hello-world' });  // true on /posts/hello-world/edit
+route.is('post.edit', { post: 'hello-world' });  // true on /posts/hello-world/edit
 ```
 
 ## What ships to the browser
@@ -55,4 +61,4 @@ Only the patterns for routes actually referenced in your code ever reach the bro
 
 ## Frontend support
 
-`route()` and `route.isCurrent()` resolve through ferry on React, Vue, and Svelte, in dev and production. The `.url` codemod sugar is React and plain-TypeScript only.
+`route()` and `route.is()` resolve through ferry on React, Vue, and Svelte, in dev and production.

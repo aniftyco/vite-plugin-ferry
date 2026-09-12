@@ -142,10 +142,12 @@ describe('generateRoutesDts', () => {
 
     expect(dts).toContain(`type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';`);
     expect(dts).toContain(`type QueryBag = Record<string, QueryValue>;`);
-    expect(dts).toContain(`[Symbol.toPrimitive](hint: string): string;`);
-    expect(dts).toContain(`declare function route<`);
+    expect(dts).toContain(`type RouteResult = string & { url: string; method: HttpMethod };`);
+    expect(dts).toContain(`declare function route<K extends keyof FerryRoutes = keyof FerryRoutes>(`);
+    expect(dts).toContain(`): RouteResult;`);
     expect(dts).toContain(`declare namespace route {`);
-    expect(dts).toContain(`function isCurrent<K extends keyof FerryRoutes>(name: K, params?: FerryRoutes[K]): boolean;`);
+    expect(dts).toContain(`function is<K extends keyof FerryRoutes>(name: K, params?: FerryRoutes[K]): boolean;`);
+    expect(dts).toContain(`function is(patterns: Array<keyof FerryRoutes | FerryRouteWildcard>): boolean;`);
   });
 
   it('is script-style: zero top-level import/export', () => {

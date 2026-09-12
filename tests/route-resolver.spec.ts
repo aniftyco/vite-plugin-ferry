@@ -5,15 +5,11 @@ import { pathToFileURL } from 'node:url';
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { ROUTE_RUNTIME } from '../src/delivery/route-runtime.js';
 
-type RouteResult = {
-  url: string;
-  method: string;
-  toString(): string;
-  [Symbol.toPrimitive](hint: string): string;
-};
+// A boxed String at runtime: a real string that also carries { url, method }.
+type RouteResult = string & { url: string; method: string };
 
 let route: ((pattern: string, params?: any, method?: string) => RouteResult) & {
-  isCurrent(patternOrPatterns: string | string[]): boolean;
+  is(patternOrPatterns: string | string[], params?: any): boolean;
 };
 
 beforeAll(async () => {
@@ -89,66 +85,89 @@ describe('route() runtime resolver', () => {
     expect(`${result}`).toBe('/users/1');
     expect('' + result).toBe('/users/1');
   });
+
+  it('behaves as a real string (boxed String), so string methods work', () => {
+    const result = route('/users/{user}', { user: 1 }, 'get');
+    expect(result.startsWith('/users')).toBe(true);
+    expect(result.length).toBe('/users/1'.length);
+    expect(JSON.stringify({ href: result })).toBe(JSON.stringify({ href: '/users/1' }));
+    expect(new URL(String(result), 'https://example.com').pathname).toBe('/users/1');
+  });
+
+  it('satisfies Inertia isUrlMethodPair: typeof object with own url + method carrying the verb', () => {
+    // Inertia's guard is `typeof href === 'object' && 'url' in href && 'method' in href`.
+    const result = route('/users/{user}', { user: 1 }, 'delete');
+    expect(typeof result).toBe('object');
+    expect('url' in result).toBe(true);
+    expect('method' in result).toBe(true);
+    expect(result.url).toBe('/users/1');
+    expect(result.method).toBe('delete');
+  });
 });
 
-describe('route.isCurrent() runtime', () => {
+describe('route.is() runtime', () => {
   it('returns false during SSR (no window)', () => {
-    expect(route.isCurrent('/users/{user}')).toBe(false);
+    expect(route.is('/users/{user}')).toBe(false);
   });
 
   it('matches the current path against a single pattern', () => {
     (globalThis as any).window = { location: { pathname: '/users/1' } };
-    expect(route.isCurrent('/users/{user}')).toBe(true);
-    expect(route.isCurrent('/posts/{post}')).toBe(false);
+    expect(route.is('/users/{user}')).toBe(true);
+    expect(route.is('/posts/{post}')).toBe(false);
   });
 
   it('matches against any pattern in an expanded wildcard array', () => {
     (globalThis as any).window = { location: { pathname: '/users' } };
-    expect(route.isCurrent(['/users', '/users/{user}'])).toBe(true);
+    expect(route.is(['/users', '/users/{user}'])).toBe(true);
+  });
+
+  it('returns false when the current path matches none of an array of patterns', () => {
+    (globalThis as any).window = { location: { pathname: '/dashboard' } };
+    expect(route.is(['/users', '/posts/{post}'])).toBe(false);
   });
 
   it('treats an absent optional segment as matching', () => {
     (globalThis as any).window = { location: { pathname: '/posts/1/comments' } };
-    expect(route.isCurrent('/posts/{post}/comments/{comment?}')).toBe(true);
+    expect(route.is('/posts/{post}/comments/{comment?}')).toBe(true);
   });
 
   it('does not match a longer path than the pattern', () => {
     (globalThis as any).window = { location: { pathname: '/users/1/edit' } };
-    expect(route.isCurrent('/users/{user}')).toBe(false);
+    expect(route.is('/users/{user}')).toBe(false);
   });
 
   it('matches the concrete param when params are passed', () => {
     (globalThis as any).window = { location: { pathname: '/users/1' } };
-    expect(route.isCurrent('/users/{user}', { user: 1 })).toBe(true);
-    expect(route.isCurrent('/users/{user}', { user: 2 })).toBe(false);
+    expect(route.is('/users/{user}', { user: 1 })).toBe(true);
+    expect(route.is('/users/{user}', { user: 2 })).toBe(false);
   });
 
   it('matches any param when no params are passed', () => {
     (globalThis as any).window = { location: { pathname: '/users/2' } };
-    expect(route.isCurrent('/users/{user}')).toBe(true);
+    expect(route.is('/users/{user}')).toBe(true);
     (globalThis as any).window = { location: { pathname: '/users/1' } };
-    expect(route.isCurrent('/users/{user}')).toBe(true);
+    expect(route.is('/users/{user}')).toBe(true);
   });
 
   it('ignores extra (query) keys when comparing the path with params', () => {
     (globalThis as any).window = { location: { pathname: '/users/1' } };
-    expect(route.isCurrent('/users/{user}', { user: 1, tab: 'a' })).toBe(true);
+    expect(route.is('/users/{user}', { user: 1, tab: 'a' })).toBe(true);
   });
 
   it('matches a scoped-binding pattern against the current path', () => {
     (globalThis as any).window = { location: { pathname: '/posts/hello-world/edit' } };
-    expect(route.isCurrent('/posts/{post:slug}/edit')).toBe(true);
-    expect(route.isCurrent('/posts/{post:slug}')).toBe(false);
+    expect(route.is('/posts/{post:slug}/edit')).toBe(true);
+    expect(route.is('/posts/{post:slug}')).toBe(false);
   });
 
   it('matches the concrete scoped-binding value when params are passed', () => {
     (globalThis as any).window = { location: { pathname: '/posts/hello-world/edit' } };
-    expect(route.isCurrent('/posts/{post:slug}/edit', { post: 'hello-world' })).toBe(true);
-    expect(route.isCurrent('/posts/{post:slug}/edit', { post: 'other' })).toBe(false);
+    expect(route.is('/posts/{post:slug}/edit', { post: 'hello-world' })).toBe(true);
+    expect(route.is('/posts/{post:slug}/edit', { post: 'other' })).toBe(false);
   });
 
   it('treats an absent optional scoped binding as matching', () => {
     (globalThis as any).window = { location: { pathname: '/posts' } };
-    expect(route.isCurrent('/posts/{post:slug?}')).toBe(true);
+    expect(route.is('/posts/{post:slug?}')).toBe(true);
   });
 });
