@@ -112,6 +112,25 @@ describe('collectRenderInputs (Inertia::render analysis)', () => {
     expect(page.fields.stats.undecidable).toBeUndefined();
   });
 
+  it('rewrites a bare known-enum name in a @ferry pin to its <Enum>Value backing-value union', () => {
+    const pinned = renderInputs().find((i) => i.key === 'Pinned/Show')!;
+    expect(pinned).toBeTruthy();
+
+    // Bare name, bare name inside an object literal, and an explicit value-form pin.
+    expect(pinned.fields.kind.type).toBe('OrderStatusValue');
+    expect(pinned.fields.detail.type).toBe('{ value: OrderStatusValue; label: string }');
+    // Already the value form — must not double-suffix to OrderStatusValueValue.
+    expect(pinned.fields.explicit.type).toBe('OrderStatusValue');
+  });
+
+  it('does NOT rewrite an auto-resolved enum-case prop — the enum CLASS name stays value-imported', () => {
+    // Users/Show renders `status => OrderStatus::PENDING`, auto-resolved to the enum class.
+    // That is the value-imported class name and must remain OrderStatus, not become ...Value.
+    const show = renderInputs().find((i) => i.key === 'Users/Show')!;
+    expect(show.fields.status.type).toBe('OrderStatus');
+    expect(show.fields.status.type).not.toContain('OrderStatusValue');
+  });
+
   it('surfaces the @ferry/resources import for wrapper-resolved resource props', () => {
     const { pages } = buildPages(renderInputs(), false);
     const partial = pages.find((p) => p.typeName === 'PartialsShowProps')!;
@@ -285,6 +304,18 @@ describe('generatePagesDtsBlock', () => {
         }
       `.trimEnd()
     );
+  });
+
+  it('type-only imports a pinned <Enum>Value union without a spurious enum-class value import', () => {
+    // `\bOrderStatus\b` never matches inside `OrderStatusValue`, so a pin naming only the union
+    // must be imported as its own type-only line — and must NOT pull in the enum class.
+    const pages: PageEntry[] = [{ typeName: 'OrdersShowProps', type: '{ status: OrderStatusValue }' }];
+
+    const block = generatePagesDtsBlock(pages, knownResources, knownEnums);
+
+    expect(block).toContain(`import type { OrderStatusValue } from '@ferry/enums';`);
+    // No value-import of the enum class, since the union form does not reference it.
+    expect(block).not.toContain(`import { OrderStatus } from '@ferry/enums';`);
   });
 
   it('emits an empty declare module block when there are no pages', () => {
@@ -475,6 +506,92 @@ describe('generated page types (tsc --noEmit consumer check)', () => {
     `;
 
     const { ok, output } = typecheck(ambient, augmentation, consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('a pinned <Enum>Value union resolves to the real type, not any (tsc --noEmit)', () => {
+  const orderStatus: EnumDefinition = {
+    name: 'OrderStatus',
+    backing: 'string',
+    cases: [
+      { key: 'PENDING', value: 'pending', label: 'Pending' },
+      { key: 'SHIPPED', value: 'shipped', label: 'Shipped' },
+    ],
+  };
+
+  // A page prop pinned to the enum's backing-value union (not the enum class).
+  const pages: PageEntry[] = [
+    { typeName: 'OrdersShowProps', type: '{ status: { value: OrderStatusValue; label: string } }' },
+  ];
+
+  const ambient = assembleAmbientTypes({
+    blocks: [
+      ENUM_BASE_DTS,
+      generateEnumsDts({ OrderStatus: orderStatus }),
+      generatePagesDtsBlock(pages, knownResources, new Set(['OrderStatus'])),
+    ],
+  });
+
+  it('type-only imports the pinned OrderStatusValue into the @ferry/pages block', () => {
+    expect(ambient).toContain(`import type { OrderStatusValue } from '@ferry/enums';`);
+  });
+
+  it('types the pinned union, so a wrong value assignment errors (proving it is not any)', () => {
+    const consumer = dedent`
+      import type { OrdersShowProps } from '@ferry/pages';
+
+      declare const props: OrdersShowProps;
+
+      // A correct backing value assigns cleanly.
+      const value: string = props.status.value;
+
+      // @ts-expect-error 'BOGUS' is outside the OrderStatusValue backing-value union.
+      // Were the field silently \`any\`, this directive would be unused and tsc would fail (TS2578).
+      props.status.value = 'BOGUS';
+    `;
+
+    const { ok, output } = typecheck(ambient, '', consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('a bare enum-name page pin resolves to its value union end-to-end (tsc --noEmit)', () => {
+  const orderStatus: EnumDefinition = {
+    name: 'OrderStatus',
+    backing: 'string',
+    cases: [
+      { key: 'PENDING', value: 'pending', label: 'Pending' },
+      { key: 'SHIPPED', value: 'shipped', label: 'Shipped' },
+    ],
+  };
+
+  // The PinnedEnumController fixture pins `kind` to the bare `OrderStatus` name.
+  const { pages } = buildPages(renderInputs(), false);
+  const pinned = pages.filter((p) => p.typeName === 'PinnedShowProps');
+
+  const ambient = assembleAmbientTypes({
+    blocks: [
+      ENUM_BASE_DTS,
+      generateEnumsDts({ OrderStatus: orderStatus }),
+      generatePagesDtsBlock(pinned, knownResources, new Set(['OrderStatus'])),
+    ],
+  });
+
+  it('emits OrderStatusValue and type-only imports it', () => {
+    expect(ambient).toContain('kind: OrderStatusValue');
+    expect(ambient).toContain(`import type { OrderStatusValue } from '@ferry/enums';`);
+  });
+
+  it('types the pinned prop, so a wrong value assignment errors (proving it is not any)', () => {
+    const consumer = dedent`
+      import type { PinnedShowProps } from '@ferry/pages';
+      declare const props: PinnedShowProps;
+
+      // @ts-expect-error 'BOGUS' is outside the OrderStatusValue backing-value union.
+      props.kind = 'BOGUS';
+    `;
+    const { ok, output } = typecheck(ambient, '', consumer);
     expect(ok, `tsc reported errors:\n${output}`).toBe(true);
   });
 });

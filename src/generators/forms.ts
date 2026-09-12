@@ -55,6 +55,24 @@ function typeContainsName(type: string, name: string): boolean {
 }
 
 /**
+ * Rewrite a `@ferry` pin's type text so a bare known-enum name resolves to its backing-value
+ * union — a pin describes the JSON submitted from the frontend, where a serialized enum is always
+ * its backing value. `\bName\b` never matches inside `NameValue`, so an explicit `<Enum>Value` pin
+ * is never double-suffixed and an overlapping shorter name never matches inside a longer one; the
+ * rewrite is order-independent across `knownEnums`. A name inside a quoted string-literal type
+ * (`'OrderStatus'`) is left alone — only a bare identifier is rewritten. Applied only to
+ * human-written pin text.
+ */
+function rewriteEnumPin(type: string, knownEnums: Set<string>): string {
+  let result = type;
+  for (const enumName of knownEnums) {
+    const escaped = enumName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    result = result.replace(new RegExp(`(?<!['"\`])\\b${escaped}\\b(?!['"\`])`, 'g'), `${enumName}Value`);
+  }
+  return result;
+}
+
+/**
  * Resolve a field's rule tokens to a leaf type plus its modifiers. `sometimes` makes the key
  * optional; `nullable` unions `null` onto the value. The first token carrying a type signal
  * wins (`in:` builds a string-literal union). A field with no type signal at all — only
@@ -216,9 +234,15 @@ export function buildForms(
 
     const resolved: ResolvedField[] = [];
     for (const [key, tokens] of Object.entries(input.rules)) {
-      // Annotation pin wins verbatim over rule-derived types and clears the degrade warning.
+      // Annotation pin wins verbatim over rule-derived types and clears the degrade warning. A
+      // bare known-enum name in the pin text is rewritten to its `<Enum>Value` backing-value union.
       if (input.annotations[key] !== undefined) {
-        resolved.push({ key, type: input.annotations[key], optional: tokens.includes('sometimes'), nullable: false });
+        resolved.push({
+          key,
+          type: rewriteEnumPin(input.annotations[key], knownEnums),
+          optional: tokens.includes('sometimes'),
+          nullable: false,
+        });
         continue;
       }
 
@@ -278,7 +302,8 @@ function renderFormType(name: string, entry: FormEntry): string {
  */
 export function generateFormsDtsBlock(
   forms: Record<string, FormEntry>,
-  enumNames: Set<string> = new Set()
+  enumNames: Set<string> = new Set(),
+  knownEnums: Set<string> = new Set()
 ): string {
   const names = Object.keys(forms).sort();
   if (names.length === 0) {
@@ -286,13 +311,17 @@ export function generateFormsDtsBlock(
   }
 
   // Only import the `<Enum>Value` types actually referenced by a rendered field type. The
-  // import is block-scoped, so it does NOT flip the ambient file to module mode.
+  // import is block-scoped, so it does NOT flip the ambient file to module mode. Both
+  // auto-resolved `Rule::enum(...)` fields (`enumNames`) and `@ferry` pins that name a
+  // generated backing-value union (`knownEnums`) are scanned; a pin never populates
+  // `enumNames`, so scanning every known enum is what keeps a pinned `<Enum>Value` typed.
+  const scanEnums = new Set([...enumNames, ...knownEnums]);
   const used = new Set<string>();
   for (const name of names) {
     const entry = forms[name];
     if (entry.kind !== 'shape') continue;
     for (const field of Object.values(entry.fields)) {
-      for (const enumName of enumNames) {
+      for (const enumName of scanEnums) {
         if (typeContainsName(field.type, `${enumName}Value`)) used.add(`${enumName}Value`);
       }
     }
@@ -380,5 +409,5 @@ export function registerForms({ requestsDir, cwd, delivery, strict = false }: Fo
   for (const warning of warnings) logWarn('forms', warning);
 
   delivery.virtual.register(FORMS_MODULE_ID, FORM_RUNTIME);
-  delivery.dts.register(FORMS_MODULE_ID, generateFormsDtsBlock(forms, enumNames));
+  delivery.dts.register(FORMS_MODULE_ID, generateFormsDtsBlock(forms, enumNames, knownEnums));
 }

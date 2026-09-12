@@ -458,7 +458,7 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
     for (const col of meta!.columns) {
       if (!serialized(col.name)) continue;
       if (annotations[col.name] !== undefined) {
-        out[col.name] = { type: annotations[col.name], optional: false };
+        out[col.name] = { type: rewriteEnumPin(annotations[col.name], knownEnums), optional: false };
         continue;
       }
       const leaf = resolveLeaf(col.name);
@@ -472,7 +472,7 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
     for (const append of meta!.appends ?? []) {
       if (!serialized(append)) continue;
       if (annotations[append] !== undefined) {
-        out[append] = { type: annotations[append], optional: false };
+        out[append] = { type: rewriteEnumPin(annotations[append], knownEnums), optional: false };
         continue;
       }
       const documented = propertyTypes[append];
@@ -484,9 +484,10 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
   for (const [field, info] of Object.entries(staticFields)) {
     const optional = info.optional;
 
-    // 1. Annotation override — emitted verbatim, clears any warning.
+    // 1. Annotation override — emitted verbatim, clears any warning. A bare known-enum name in
+    // the pin text is rewritten to its `<Enum>Value` backing-value union.
     if (annotations[field] !== undefined) {
-      out[field] = { type: annotations[field], optional };
+      out[field] = { type: rewriteEnumPin(annotations[field], knownEnums), optional };
       continue;
     }
 
@@ -562,7 +563,7 @@ export function mergeResourceFields(options: MergeResourceOptions): Record<strin
   // inherited fields. (The vendor model-shape path applies pins inline above; nothing to add.)
   if (options.parentFields !== undefined) {
     for (const [field, type] of Object.entries(annotations)) {
-      out[field] = { type, optional: out[field]?.optional ?? false };
+      out[field] = { type: rewriteEnumPin(type, knownEnums), optional: out[field]?.optional ?? false };
     }
   }
 
@@ -660,6 +661,26 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Rewrite a `@ferry` pin's type text so a bare known-enum name resolves to its backing-value
+ * union — a pin describes the JSON the frontend receives, where a serialized enum is always its
+ * backing value. `\bName\b` never matches inside `NameValue`, so an explicit `<Enum>Value` pin is
+ * never double-suffixed and an overlapping shorter name (`Order`) never matches inside a longer
+ * one (`OrderStatus`); the rewrite is therefore order-independent across `knownEnums`. A name
+ * inside a quoted string-literal type (`'OrderStatus'`) is left alone — only a bare identifier is
+ * rewritten. Applied only to human-written pin text, never to auto-resolved field types.
+ */
+function rewriteEnumPin(type: string, knownEnums: Set<string>): string {
+  let result = type;
+  for (const enumName of knownEnums) {
+    result = result.replace(
+      new RegExp(`(?<!['"\`])\\b${escapeRegExp(enumName)}\\b(?!['"\`])`, 'g'),
+      `${enumName}Value`
+    );
+  }
+  return result;
+}
+
 /** Whether a TypeScript type string references `name` as a whole identifier. */
 function typeContainsName(type: string, name: string): boolean {
   return new RegExp(`\\b${escapeRegExp(name)}\\b`).test(type);
@@ -694,19 +715,28 @@ function renderResourceType(name: string, entry: ResourceEntry): string {
  * is block-scoped, so it does NOT flip the ambient file to module mode (the same pattern
  * the enums block uses to import the base `Enum`).
  */
-export function generateResourcesDtsBlock(resources: Record<string, ResourceEntry>, enumNames: Set<string>): string {
+export function generateResourcesDtsBlock(
+  resources: Record<string, ResourceEntry>,
+  enumNames: Set<string>,
+  knownEnums: Set<string> = new Set()
+): string {
   const names = Object.keys(resources).sort();
   if (names.length === 0) {
     return `declare module '${RESOURCES_MODULE_ID}' {}`;
   }
 
-  // Only import the `<Enum>Value` types actually referenced by a rendered field type.
+  // Only import the `<Enum>Value` types actually referenced by a rendered field type. This
+  // covers both auto-resolved enum casts (`enumNames`) and `@ferry` pins whose text names a
+  // generated backing-value union (`knownEnums`); a pin never populates `enumNames`, so
+  // scanning against every known enum is what keeps a pinned `<Enum>Value` from silently
+  // resolving to `any`.
+  const scanEnums = new Set([...enumNames, ...knownEnums]);
   const used = new Set<string>();
   for (const name of names) {
     const entry = resources[name];
     if (entry.kind !== 'shape') continue;
     for (const field of Object.values(entry.fields)) {
-      for (const enumName of enumNames) {
+      for (const enumName of scanEnums) {
         if (typeContainsName(field.type, `${enumName}Value`)) used.add(`${enumName}Value`);
       }
     }
@@ -1019,5 +1049,5 @@ export function registerResources({
   for (const warning of warnings) logWarn('resources', warning);
 
   delivery.virtual.register(RESOURCES_MODULE_ID, RESOURCE_RUNTIME);
-  delivery.dts.register(RESOURCES_MODULE_ID, generateResourcesDtsBlock(resources, enumNames));
+  delivery.dts.register(RESOURCES_MODULE_ID, generateResourcesDtsBlock(resources, enumNames, knownEnums));
 }

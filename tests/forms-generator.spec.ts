@@ -171,6 +171,34 @@ describe('buildForms — rule → type mapping', () => {
     expect(warnings.some((w) => w.includes('StoreUserRequest.meta'))).toBe(false);
   });
 
+  it('rewrites a bare known-enum name in a @ferry pin to its <Enum>Value backing-value union', () => {
+    const { forms } = buildForms(
+      [
+        {
+          className: 'StorePickRequest',
+          rules: {
+            priority: ['required'],
+            detail: ['required'],
+            explicit: ['required'],
+          },
+          annotations: {
+            priority: 'Priority', // bare name → value union
+            detail: '{ value: Priority; label: string }', // bare name inside an object literal
+            explicit: 'PriorityValue', // already the value form — must not double-suffix
+          },
+        },
+      ],
+      false,
+      enums,
+      knownEnums
+    );
+
+    const f = fieldsOf(forms, 'StorePickRequest');
+    expect(f.priority).toEqual({ type: 'PriorityValue', optional: false });
+    expect(f.detail).toEqual({ type: '{ value: PriorityValue; label: string }', optional: false });
+    expect(f.explicit).toEqual({ type: 'PriorityValue', optional: false });
+  });
+
   it('inlines the backing-value union when the enum is collected but not a known ferry enum', () => {
     const { forms } = buildForms(
       [{ className: 'PickRequest', rules: { status: ['required', 'enum:Role'] }, annotations: {} }],
@@ -236,6 +264,23 @@ describe('generateFormsDtsBlock', () => {
     expect(block).toContain(`import { PriorityValue, RoleValue } from '@ferry/enums';`);
     expect(block).toContain('assigned_role: RoleValue;');
     expect(block).toContain('priority: PriorityValue;');
+  });
+
+  it('imports a pinned <Enum>Value even when no Rule::enum resolved it, driving off knownEnums', () => {
+    // A `@ferry` pin naming `PriorityValue` never populates the resolution-tracked
+    // `enumNames`; the import must be driven off the known-enum set instead.
+    const forms: Record<string, FormEntry> = {
+      StorePickRequest: {
+        kind: 'shape',
+        fields: {
+          id: { type: 'number', optional: false },
+          priority: { type: '{ value: PriorityValue; label: string }', optional: false },
+        },
+      },
+    };
+
+    const block = generateFormsDtsBlock(forms, new Set(), new Set(['Priority']));
+    expect(block).toContain(`import { PriorityValue } from '@ferry/enums';`);
   });
 
   it('emits an empty declare module block when there are no forms', () => {
@@ -379,6 +424,73 @@ describe('generated form types (tsc --noEmit consumer check)', () => {
       const badMeta: Record<string, number> = form.data.meta;
     `;
 
+    const { ok, output } = typecheck(ambient, consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('a pinned <Enum>Value resolves to the real union, not any (tsc --noEmit)', () => {
+  // The natural pin form names the enum's backing-value union. No `Rule::enum` resolves it,
+  // so `enumNames` is EMPTY; only the known-enum set carries Priority.
+  const forms: Record<string, FormEntry> = {
+    StorePickRequest: {
+      kind: 'shape',
+      fields: {
+        id: { type: 'number', optional: false },
+        priority: { type: '{ value: PriorityValue; label: string }', optional: false },
+      },
+    },
+  };
+
+  const ambient = assembleAmbientTypes({
+    blocks: [ENUM_BASE_DTS, generateEnumsDts(enums), generateFormsDtsBlock(forms, new Set(), knownEnums)],
+  });
+
+  it('imports the pinned PriorityValue into the @ferry/forms block', () => {
+    expect(ambient).toContain(`import { PriorityValue } from '@ferry/enums';`);
+  });
+
+  it('types the pinned field, so a wrong value assignment errors (proving it is not any)', () => {
+    const consumer = dedent`
+      import type { StorePickRequest } from '@ferry/forms';
+
+      declare const req: StorePickRequest;
+
+      // @ts-expect-error 99 is outside the PriorityValue backing-value union.
+      // Were the field silently \`any\`, this directive would be unused and tsc would fail (TS2578).
+      req.priority.value = 99;
+    `;
+
+    const { ok, output } = typecheck(ambient, consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('a bare enum-name form pin resolves to its value union end-to-end (tsc --noEmit)', () => {
+  const { forms } = buildForms(
+    [{ className: 'StorePickRequest', rules: { priority: ['required'] }, annotations: { priority: 'Priority' } }],
+    false,
+    enums,
+    knownEnums
+  );
+
+  const ambient = assembleAmbientTypes({
+    blocks: [ENUM_BASE_DTS, generateEnumsDts(enums), generateFormsDtsBlock(forms, new Set(), knownEnums)],
+  });
+
+  it('emits PriorityValue and imports it', () => {
+    expect(ambient).toContain('priority: PriorityValue;');
+    expect(ambient).toContain(`import { PriorityValue } from '@ferry/enums';`);
+  });
+
+  it('types the field, so a wrong value assignment errors (proving it is not any)', () => {
+    const consumer = dedent`
+      import type { StorePickRequest } from '@ferry/forms';
+      declare const req: StorePickRequest;
+
+      // @ts-expect-error 99 is outside the PriorityValue backing-value union.
+      req.priority = 99;
+    `;
     const { ok, output } = typecheck(ambient, consumer);
     expect(ok, `tsc reported errors:\n${output}`).toBe(true);
   });

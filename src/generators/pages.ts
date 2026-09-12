@@ -298,9 +298,12 @@ export function collectRenderInputs(options: {
               ? parseEntries(render.propsNode.items ?? [], inferOptions)
               : {};
 
-          // `@ferry <prop> <TS type>` on the action overrides a prop verbatim.
+          // `@ferry <prop> <TS type>` on the action overrides a prop verbatim; a bare known-enum
+          // name in the pin text is rewritten to its `<Enum>Value` backing-value union.
           for (const [prop, type] of Object.entries(annotations)) {
-            if (fields[prop]) fields[prop] = { ...fields[prop], type, undecidable: false };
+            if (fields[prop]) {
+              fields[prop] = { ...fields[prop], type: rewriteEnumPin(type, knownEnums), undecidable: false };
+            }
           }
 
           inputs.push({ key: render.key, fields });
@@ -398,7 +401,8 @@ function collectShareFields(
     Object.assign(fields, parseEntries(arr.items ?? [], inferOptions));
   }
 
-  for (const [prop, type] of Object.entries(extractFerryAnnotations(methodDocText(method)))) {
+  for (const [prop, rawType] of Object.entries(extractFerryAnnotations(methodDocText(method)))) {
+    const type = rewriteEnumPin(rawType, inferOptions.knownEnums);
     fields[prop] = fields[prop]
       ? { ...fields[prop], type, undecidable: false }
       : { type, optional: false, undecidable: false };
@@ -526,6 +530,27 @@ function typeReferences(type: string, name: string): boolean {
   return new RegExp(`\\b${escapeRegExp(name)}\\b`).test(type);
 }
 
+/**
+ * Rewrite a `@ferry` pin's type text so a bare known-enum name resolves to its backing-value
+ * union — a pin describes the JSON the frontend receives, where a serialized enum is always its
+ * backing value. `\bName\b` never matches inside `NameValue`, so an explicit `<Enum>Value` pin is
+ * never double-suffixed and an overlapping shorter name never matches inside a longer one; the
+ * rewrite is order-independent across `knownEnums`. A name inside a quoted string-literal type
+ * (`'OrderStatus'`) is left alone — only a bare identifier is rewritten. Applied ONLY to
+ * human-written pin text — never to an auto-resolved enum-case prop, which stays the
+ * value-imported enum CLASS name.
+ */
+function rewriteEnumPin(type: string, knownEnums: Set<string>): string {
+  let result = type;
+  for (const enumName of knownEnums) {
+    result = result.replace(
+      new RegExp(`(?<!['"\`])\\b${escapeRegExp(enumName)}\\b(?!['"\`])`, 'g'),
+      `${enumName}Value`
+    );
+  }
+  return result;
+}
+
 /** Indent every non-empty line by two spaces. */
 function indentBlock(block: string): string {
   return block
@@ -542,10 +567,17 @@ function indentBlock(block: string): string {
 function referenceImports(types: string[], knownResources: Set<string>, knownEnums: Set<string>): string[] {
   const usedResources = new Set<string>();
   const usedEnums = new Set<string>();
+  const usedEnumValues = new Set<string>();
 
   for (const type of types) {
     for (const name of knownResources) if (typeReferences(type, name)) usedResources.add(name);
-    for (const name of knownEnums) if (typeReferences(type, name)) usedEnums.add(name);
+    for (const name of knownEnums) {
+      // The enum CLASS name is value-imported; its `<Enum>Value` backing-value union is a
+      // distinct, type-only import. `\bName\b` never matches inside `NameValue`, so a pin
+      // that names only the union would otherwise go unimported and silently degrade to `any`.
+      if (typeReferences(type, name)) usedEnums.add(name);
+      if (typeReferences(type, `${name}Value`)) usedEnumValues.add(`${name}Value`);
+    }
   }
 
   const lines: string[] = [];
@@ -554,6 +586,9 @@ function referenceImports(types: string[], knownResources: Set<string>, knownEnu
   }
   if (usedEnums.size > 0) {
     lines.push(`import { ${[...usedEnums].sort().join(', ')} } from '${ENUMS_MODULE_ID}';`);
+  }
+  if (usedEnumValues.size > 0) {
+    lines.push(`import type { ${[...usedEnumValues].sort().join(', ')} } from '${ENUMS_MODULE_ID}';`);
   }
   return lines;
 }

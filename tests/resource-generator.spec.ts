@@ -328,6 +328,89 @@ describe('buildResources', () => {
       )
     ).not.toThrow();
   });
+
+  it('rewrites a bare known-enum name in a @ferry pin to its <Enum>Value backing-value union', () => {
+    const { resources } = buildResources(
+      [
+        {
+          className: 'OrderResource',
+          model: 'Order',
+          staticFields: {
+            status: { type: 'any', optional: false },
+            detail: { type: 'any', optional: false },
+          },
+          annotations: {
+            status: 'OrderStatus',
+            detail: '{ value: OrderStatus; label: string }',
+          },
+          propertyShapes: {},
+          enumNames: [],
+        },
+      ],
+      {},
+      false,
+      new Set(['OrderStatus'])
+    );
+
+    const fields = (resources.OrderResource as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+    // Bare name and a bare name inside an object literal both become the value union.
+    expect(fields.status).toEqual({ type: 'OrderStatusValue', optional: false });
+    expect(fields.detail).toEqual({ type: '{ value: OrderStatusValue; label: string }', optional: false });
+  });
+
+  it('leaves an explicit <Enum>Value pin unchanged and never double-suffixes overlapping names', () => {
+    const { resources } = buildResources(
+      [
+        {
+          className: 'OrderResource',
+          model: 'Order',
+          staticFields: {
+            explicit: { type: 'any', optional: false },
+            short: { type: 'any', optional: false },
+            long: { type: 'any', optional: false },
+          },
+          annotations: {
+            explicit: 'OrderStatusValue', // already the value form — must not become ...ValueValue
+            short: 'Order', // shorter overlapping name
+            long: 'OrderStatus', // longer overlapping name
+          },
+          propertyShapes: {},
+          enumNames: [],
+        },
+      ],
+      {},
+      false,
+      new Set(['Order', 'OrderStatus'])
+    );
+
+    const fields = (resources.OrderResource as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+    expect(fields.explicit).toEqual({ type: 'OrderStatusValue', optional: false });
+    expect(fields.short).toEqual({ type: 'OrderValue', optional: false });
+    expect(fields.long).toEqual({ type: 'OrderStatusValue', optional: false });
+  });
+
+  it('rewrites a bare enum identifier but leaves a same-named quoted string literal untouched', () => {
+    const { resources } = buildResources(
+      [
+        {
+          className: 'OrderResource',
+          model: 'Order',
+          staticFields: { mixed: { type: 'any', optional: false } },
+          annotations: { mixed: "{ kind: 'OrderStatus'; value: OrderStatus }" },
+          propertyShapes: {},
+          enumNames: [],
+        },
+      ],
+      {},
+      false,
+      new Set(['OrderStatus'])
+    );
+
+    const fields = (resources.OrderResource as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+    // The string-literal `'OrderStatus'` is a value, not the enum type — it must not be rewritten;
+    // only the bare identifier `OrderStatus` becomes the backing-value union.
+    expect(fields.mixed).toEqual({ type: "{ kind: 'OrderStatus'; value: OrderStatusValue }", optional: false });
+  });
 });
 
 describe('generateResourcesDtsBlock', () => {
@@ -361,6 +444,23 @@ describe('generateResourcesDtsBlock', () => {
 
     // The old, wrong namespace must be gone.
     expect(block).not.toContain('@app/enums');
+  });
+
+  it('imports a pinned <Enum>Value even when enumNames is empty, driving off knownEnums', () => {
+    // A `@ferry` pin naming `OrderStatusValue` never populates the resolution-tracked
+    // `enumNames`; the import must instead be driven off the known-enum set.
+    const resources: Record<string, ResourceEntry> = {
+      OrderResource: {
+        kind: 'shape',
+        fields: {
+          id: { type: 'number', optional: false },
+          status: { type: '{ value: OrderStatusValue; label: string }', optional: false },
+        },
+      },
+    };
+
+    const block = generateResourcesDtsBlock(resources, new Set(), new Set(['OrderStatus']));
+    expect(block).toContain(`import { OrderStatusValue } from '@ferry/enums';`);
   });
 
   it('emits an empty declare module block when there are no resources', () => {
@@ -1015,6 +1115,114 @@ describe('generated resource types (tsc --noEmit consumer check)', () => {
       const bad: OrderStatus = order.status;
     `;
 
+    const { ok, output } = typecheck(ambient, consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('a pinned <Enum>Value resolves to the real union, not any (tsc --noEmit)', () => {
+  const orderStatus: EnumDefinition = {
+    name: 'OrderStatus',
+    backing: 'string',
+    cases: [
+      { key: 'PENDING', value: 'pending', label: 'Pending Order' },
+      { key: 'SHIPPED', value: 'shipped', label: 'Shipped' },
+    ],
+  };
+
+  // The natural pin form: an object literal whose text names the enum's backing-value union.
+  // `enumNames` is EMPTY (a pin never resolves through it); only `knownEnums` carries OrderStatus.
+  const resources: Record<string, ResourceEntry> = {
+    OrderResource: {
+      kind: 'shape',
+      fields: {
+        id: { type: 'number', optional: false },
+        status: { type: '{ value: OrderStatusValue; label: string }', optional: false },
+      },
+    },
+  };
+
+  const ambient = assembleAmbientTypes({
+    blocks: [
+      ENUM_BASE_DTS,
+      generateEnumsDts({ OrderStatus: orderStatus }),
+      generateResourcesDtsBlock(resources, new Set(), new Set(['OrderStatus'])),
+    ],
+  });
+
+  it('imports the pinned OrderStatusValue into the @ferry/resources block', () => {
+    expect(ambient).toContain(`import { OrderStatusValue } from '@ferry/enums';`);
+  });
+
+  it('types the pinned field, so a wrong value assignment errors (proving it is not any)', () => {
+    // skipLibCheck stays true (the default that hides the silent-any bug in real projects);
+    // the assignment must still be caught because the type resolves inside the same block.
+    const consumer = dedent`
+      import type { OrderResource } from '@ferry/resources';
+
+      declare const order: OrderResource;
+
+      // A correct backing value assigns cleanly.
+      const value: string = order.status.value;
+
+      // @ts-expect-error 'BOGUS' is outside the OrderStatusValue backing-value union.
+      // Were the field silently \`any\`, this directive would be unused and tsc would fail (TS2578).
+      order.status.value = 'BOGUS';
+    `;
+
+    const { ok, output } = typecheck(ambient, consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('a bare enum-name pin resolves to its value union end-to-end (tsc --noEmit)', () => {
+  const orderStatus: EnumDefinition = {
+    name: 'OrderStatus',
+    backing: 'string',
+    cases: [
+      { key: 'PENDING', value: 'pending', label: 'Pending Order' },
+      { key: 'SHIPPED', value: 'shipped', label: 'Shipped' },
+    ],
+  };
+
+  // A human writes the bare enum class name in the pin; the rewrite turns it into the value union.
+  const { resources } = buildResources(
+    [
+      {
+        className: 'OrderResource',
+        model: 'Order',
+        staticFields: { status: { type: 'any', optional: false } },
+        annotations: { status: 'OrderStatus' },
+        propertyShapes: {},
+        enumNames: [],
+      },
+    ],
+    {},
+    false,
+    new Set(['OrderStatus'])
+  );
+
+  const ambient = assembleAmbientTypes({
+    blocks: [
+      ENUM_BASE_DTS,
+      generateEnumsDts({ OrderStatus: orderStatus }),
+      generateResourcesDtsBlock(resources, new Set(), new Set(['OrderStatus'])),
+    ],
+  });
+
+  it('emits OrderStatusValue and imports it', () => {
+    expect(ambient).toContain('status: OrderStatusValue;');
+    expect(ambient).toContain(`import { OrderStatusValue } from '@ferry/enums';`);
+  });
+
+  it('types the field, so a wrong value assignment errors (proving it is not any)', () => {
+    const consumer = dedent`
+      import type { OrderResource } from '@ferry/resources';
+      declare const order: OrderResource;
+
+      // @ts-expect-error 'BOGUS' is outside the OrderStatusValue backing-value union.
+      order.status = 'BOGUS';
+    `;
     const { ok, output } = typecheck(ambient, consumer);
     expect(ok, `tsc reported errors:\n${output}`).toBe(true);
   });
