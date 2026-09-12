@@ -3,12 +3,14 @@ import type { LogLevel, Plugin } from 'vite';
 import { transformRoutes, transformRoutesPost } from './codemod/routes.js';
 import { createDelivery } from './delivery/index.js';
 import { registerEnums } from './generators/enums.js';
+import { registerEnv } from './generators/env.js';
 import { registerForms } from './generators/forms.js';
 import { registerPages } from './generators/pages.js';
 import { registerResources } from './generators/resources.js';
 import { registerRoutes, type RouteTable } from './generators/routes.js';
 import { logError, setVerbosity, type Verbosity } from './utils/banner.js';
 import { setupEnumWatcher } from './watchers/enums.js';
+import { setupEnvWatcher } from './watchers/env.js';
 import { setupFormWatcher } from './watchers/forms.js';
 import { setupPageWatcher } from './watchers/pages.js';
 import { setupResourceWatcher } from './watchers/resources.js';
@@ -72,6 +74,12 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
   // and on route-file changes in dev.
   let routeTable: RouteTable = {};
 
+  // Vite's resolved mode and env directory, captured in the `config` hook (the only place
+  // the user config and ConfigEnv are available) and reused by `generateAll()` and the env
+  // watcher to load the right `.env*` files.
+  let mode = 'development';
+  let envDir: string | false = cwd;
+
   /**
    * Generate all packages.
    */
@@ -90,6 +98,9 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
 
     // Register @ferry/forms (per-FormRequest data-shape types) for typed useForm<T>().
     registerForms({ requestsDir, cwd, delivery, strict });
+
+    // Register the `ImportMetaEnv` types for the app's VITE_-prefixed env vars.
+    registerEnv({ cwd, mode, envDir, delivery });
 
     // Write the ambient declarations file from the registered d.ts blocks.
     delivery.writeTypes();
@@ -120,11 +131,16 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
     // virtual-module registrations exist before any consumer needs them. `config` fires
     // on both `vite dev` and `vite build`, and dev-time freshness is the watchers' job,
     // so this is the sole generation pass — no duplicate PHP subprocess spawns.
-    config(userConfig) {
+    config(userConfig, { mode: configMode }) {
       // The generation pass below can log, and `config` fires before `configResolved`,
       // so resolve and apply the level here first — reading the incoming config's
       // `logLevel` as the fallback when no explicit `verbosity` was given.
       setVerbosity(resolveVerbosity(userConfig.logLevel));
+
+      // Capture the mode and env directory for loading VITE_-prefixed env vars. `envDir`
+      // mirrors Vite's own default (the project root) unless the user set one explicitly.
+      mode = configMode;
+      envDir = userConfig.envDir ?? cwd;
 
       try {
         generateAll();
@@ -210,6 +226,15 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
         delivery,
         server,
         strict,
+      });
+
+      // Set up env watcher (.env* files → ImportMetaEnv types)
+      setupEnvWatcher({
+        cwd,
+        envDir,
+        mode,
+        delivery,
+        server,
       });
     },
   };

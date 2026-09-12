@@ -63,13 +63,14 @@ form.errors['profile.bio'];  // error keys derived from the shape
 - **[Resources](docs/resources.md)** (`@ferry/resources`, `@ferry/pagination`): precise types for your `JsonResource` classes from static `toArray()` analysis plus real column and cast metadata, degrading gracefully instead of breaking your build. `Resource::collection()` over a paginator types as the real `{ data, links, meta }` envelope.
 - **[Page props](docs/page-props.md)** (`@ferry/pages`): the props each Inertia page receives, typed through `usePage<T>()`, with shared props typed through Inertia's own augmentation.
 - **[Form types](docs/forms.md)** (`@ferry/forms`): the data shape of your `FormRequest` classes, typed through `useForm<T>()` with `form.errors` keys derived for free.
+- **[Environment variables](docs/environment.md)** (`import.meta.env`): every `VITE_`-prefixed env var typed as `string`, merged into Vite's own `ImportMetaEnv` — keys only, no values, no import.
 
 Any field ferry can't resolve statically degrades instead of breaking the build, and you can [pin](docs/ferry-pins.md) it precisely with a `@ferry` docblock tag.
 
 ## Documentation
 
 - [Getting started](docs/getting-started.md): requirements, plugin setup, how generation and type loading work.
-- [Routes](docs/routes.md), [Enums](docs/enums.md), [Resources](docs/resources.md), [Page props](docs/page-props.md), [Form types](docs/forms.md): the full reference for each generated surface.
+- [Routes](docs/routes.md), [Enums](docs/enums.md), [Resources](docs/resources.md), [Page props](docs/page-props.md), [Form types](docs/forms.md), [Environment variables](docs/environment.md): the full reference for each generated surface.
 - [Ferry pins](docs/ferry-pins.md): the `@ferry` docblock tag for overriding a generated type.
 - [Configuration](docs/configuration.md): the `cwd`, `strict`, and `verbosity` options.
 
