@@ -1298,12 +1298,42 @@ function ruleTokens(value: PhpParserTypes.Node): string[] {
       if (node.kind === 'string') {
         const token = (node as PhpParserTypes.String).value.trim();
         if (token) tokens.push(token);
+      } else {
+        const enumToken = enumRuleToken(node);
+        if (enumToken) tokens.push(enumToken);
       }
     }
     return tokens;
   }
 
   return [];
+}
+
+/**
+ * Recognize a `Rule::enum(SomeEnum::class)` array item and emit the synthetic token
+ * `enum:<EnumShortName>`. Everything else is a non-static rule item ferry drops. Returns
+ * null when the node isn't that exact `Rule::enum(...::class)` shape.
+ */
+function enumRuleToken(node: PhpParserTypes.Node): string | null {
+  if (node.kind !== 'call') return null;
+  const call = node as PhpParserTypes.Call;
+  if (call.what.kind !== 'staticlookup') return null;
+
+  const lookup = call.what as unknown as PhpParserTypes.StaticLookup;
+  if (lookup.what.kind !== 'name') return null;
+  const facade = (lookup.what as PhpParserTypes.Name).name.replace(/^\\+/, '').split('\\').pop();
+  const method = lookup.offset.kind === 'identifier' ? (lookup.offset as PhpParserTypes.Identifier).name : null;
+  if (facade !== 'Rule' || method !== 'enum') return null;
+
+  const first = ((call.arguments ?? []) as PhpParserTypes.Node[])[0];
+  if (!first || first.kind !== 'staticlookup') return null;
+  const argLookup = first as PhpParserTypes.StaticLookup;
+  const offset = argLookup.offset;
+  if (!(offset && offset.kind === 'identifier' && (offset as PhpParserTypes.Identifier).name === 'class')) return null;
+  if (argLookup.what.kind !== 'name') return null;
+
+  const enumName = (argLookup.what as PhpParserTypes.Name).name.replace(/^\\+/, '').split('\\').pop();
+  return enumName ? `enum:${enumName}` : null;
 }
 
 /**

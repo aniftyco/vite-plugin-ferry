@@ -154,12 +154,19 @@ export default function ferry(options: ResourceTypesPluginOptions = {}): Plugin[
 
     // Set up watchers for dev server
     configureServer(server) {
-      // Set up enum watcher
+      // Set up enum watcher. It also re-registers the enum-dependent generators (resources,
+      // pages, forms), so an enum edit refreshes their `<Enum>Value` references and imports.
       setupEnumWatcher({
         enumsDir,
         cwd,
         delivery,
         server,
+        resourcesDir,
+        modelsDir,
+        controllersDir,
+        middlewareDir,
+        requestsDir,
+        strict,
       });
 
       // Set up route watcher

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { assembleAmbientTypes } from '../src/delivery/ambient-types.js';
 import { ENUM_BASE_DTS } from '../src/delivery/enum-base.js';
+import { collectEnums, generateEnumsDts } from '../src/generators/enums.js';
 import {
   FORM_RUNTIME,
   collectFormInputs,
@@ -21,8 +22,15 @@ const repoRoot = join(import.meta.dirname, '..');
 const require = createRequire(import.meta.url);
 const tscPath = require.resolve('typescript/bin/tsc');
 
+const enums = collectEnums(join(fixturesDir, 'Enums'), fixturesDir);
+const knownEnums = new Set(Object.keys(enums));
+
 function formInputs(): FormInput[] {
   return collectFormInputs({ requestsDir: join(fixturesDir, 'Requests'), cwd: fixturesDir });
+}
+
+function build(strict = false) {
+  return buildForms(formInputs(), strict, enums, knownEnums);
 }
 
 function fieldsOf(forms: Record<string, FormEntry>, name: string): Record<string, { type: string; optional: boolean }> {
@@ -64,6 +72,28 @@ describe('parseFormRequestRules', () => {
     });
   });
 
+  it('emits a synthetic enum:<Short> token for Rule::enum(Enum::class)', () => {
+    const php = dedent`
+      <?php
+      use Illuminate\\Validation\\Rule;
+      class StoreUserRequest {
+          public function rules(): array
+          {
+              return [
+                  'role' => ['required', Rule::enum(Role::class)],
+                  'priority' => ['required', Rule::enum(\\App\\Enums\\Priority::class)],
+              ];
+          }
+      }
+    `;
+
+    expect(parseFormRequestRules(php)).toEqual({
+      role: ['required', 'enum:Role'],
+      // A fully-qualified class name resolves to its short name.
+      priority: ['required', 'enum:Priority'],
+    });
+  });
+
   it('returns null when no rules() method returning an array literal is found', () => {
     expect(parseFormRequestRules('<?php class Foo {}')).toBeNull();
     expect(
@@ -74,7 +104,7 @@ describe('parseFormRequestRules', () => {
 
 describe('buildForms — rule → type mapping', () => {
   it('maps scalar rules, nullable, sometimes, and in: enums off the fixtures', () => {
-    const { forms } = buildForms(formInputs(), false);
+    const { forms } = build();
     const f = fieldsOf(forms, 'StoreUserRequest');
 
     // required|string / required|email -> string, key present.
@@ -98,7 +128,7 @@ describe('buildForms — rule → type mapping', () => {
   });
 
   it('expands nested and wildcard keys into nested objects and arrays', () => {
-    const { forms } = buildForms(formInputs(), false);
+    const { forms } = build();
     const f = fieldsOf(forms, 'StoreUserRequest');
 
     // profile.bio nests under profile; bio is nullable, key present.
@@ -109,7 +139,7 @@ describe('buildForms — rule → type mapping', () => {
   });
 
   it('degrades a field with no mappable rule to the fallback with a warning', () => {
-    const { forms, warnings } = buildForms(formInputs(), false);
+    const { forms, warnings } = build();
     const f = fieldsOf(forms, 'StoreUserRequest');
 
     // avatar's only non-modifier rule (Rule::exists) was dropped -> no type signal -> any.
@@ -121,14 +151,57 @@ describe('buildForms — rule → type mapping', () => {
     expect(warnings.some((w) => w.includes('StoreUserRequest.callback'))).toBe(true);
   });
 
+  it('maps accepted, file rules, Rule::enum, and honors @ferry pins', () => {
+    const { forms, warnings } = build();
+    const f = fieldsOf(forms, 'StoreUserRequest');
+
+    // accepted -> boolean.
+    expect(f.terms).toEqual({ type: 'boolean', optional: false });
+
+    // file rules -> the DOM File type; nullable -> File | null.
+    expect(f.photo).toEqual({ type: 'File', optional: false });
+    expect(f.attachment).toEqual({ type: 'File | null', optional: false });
+
+    // Rule::enum(Enum::class) -> the enum's backing-value union type.
+    expect(f.assigned_role).toEqual({ type: 'RoleValue', optional: false });
+    expect(f.priority).toEqual({ type: 'PriorityValue', optional: false });
+
+    // @ferry pin wins verbatim over the degrade path AND clears the degrade warning.
+    expect(f.meta).toEqual({ type: 'Record<string, string>', optional: false });
+    expect(warnings.some((w) => w.includes('StoreUserRequest.meta'))).toBe(false);
+  });
+
+  it('inlines the backing-value union when the enum is collected but not a known ferry enum', () => {
+    const { forms } = buildForms(
+      [{ className: 'PickRequest', rules: { status: ['required', 'enum:Role'] }, annotations: {} }],
+      false,
+      enums,
+      new Set()
+    );
+    // Role is int/string-backed with cases admin|user|guest — inlined as the string union.
+    expect(fieldsOf(forms, 'PickRequest').status).toEqual({
+      type: "'admin' | 'user' | 'guest'",
+      optional: false,
+    });
+  });
+
+  it('degrades a Rule::enum whose enum ferry cannot resolve, with a warning', () => {
+    const { forms, warnings } = buildForms(
+      [{ className: 'PickRequest', rules: { status: ['required', 'enum:Ghost'] }, annotations: {} }],
+      false
+    );
+    expect(fieldsOf(forms, 'PickRequest').status).toEqual({ type: 'any', optional: false });
+    expect(warnings.some((w) => w.includes('PickRequest.status'))).toBe(true);
+  });
+
   it('uses unknown as the fallback under strict:true', () => {
-    const { forms } = buildForms(formInputs(), true);
+    const { forms } = build(true);
     const f = fieldsOf(forms, 'StoreUserRequest');
     expect(f.avatar).toEqual({ type: 'unknown', optional: false });
   });
 
   it('falls a form whose rules() cannot be analyzed back to a Record type with a warning', () => {
-    const { forms, warnings } = buildForms([{ className: 'WeirdRequest', rules: null }], false);
+    const { forms, warnings } = buildForms([{ className: 'WeirdRequest', rules: null, annotations: {} }], false);
     expect(forms.WeirdRequest).toEqual({ kind: 'fallback', record: 'any' });
     expect(warnings[0]).toContain('WeirdRequest');
   });
@@ -148,8 +221,8 @@ describe('collectFormInputs', () => {
 
 describe('generateFormsDtsBlock', () => {
   it('renders one export type per form request under the @ferry/forms module', () => {
-    const { forms } = buildForms(formInputs(), false);
-    const block = generateFormsDtsBlock(forms);
+    const { forms, enumNames } = build();
+    const block = generateFormsDtsBlock(forms, enumNames);
 
     expect(block).toContain(`declare module '@ferry/forms' {`);
     expect(block).toContain('export type StoreUserRequest = {');
@@ -158,6 +231,11 @@ describe('generateFormsDtsBlock', () => {
     expect(block).toContain('items: { id: number; label: string | null }[];');
     expect(block).toContain('profile: { bio: string | null };');
     expect(block).toContain('bio?: string;');
+
+    // Rule::enum() fields type as the enum's backing-value union, imported from @ferry/enums.
+    expect(block).toContain(`import { PriorityValue, RoleValue } from '@ferry/enums';`);
+    expect(block).toContain('assigned_role: RoleValue;');
+    expect(block).toContain('priority: PriorityValue;');
   });
 
   it('emits an empty declare module block when there are no forms', () => {
@@ -185,6 +263,7 @@ function typecheck(ambient: string, consumer: string): { ok: boolean; output: st
         compilerOptions: {
           strict: true,
           target: 'esnext',
+          lib: ['esnext', 'dom'],
           moduleResolution: 'bundler',
           module: 'esnext',
           skipLibCheck: true,
@@ -207,8 +286,10 @@ function typecheck(ambient: string, consumer: string): { ok: boolean; output: st
 }
 
 describe('generated form types (tsc --noEmit consumer check)', () => {
-  const { forms } = buildForms(formInputs(), false);
-  const ambient = assembleAmbientTypes({ blocks: [ENUM_BASE_DTS, generateFormsDtsBlock(forms)] });
+  const { forms, enumNames } = build();
+  const ambient = assembleAmbientTypes({
+    blocks: [ENUM_BASE_DTS, generateEnumsDts(enums), generateFormsDtsBlock(forms, enumNames)],
+  });
 
   it('is a script-style ambient file (zero top-level import/export)', () => {
     const topLevel = ambient.split('\n').filter((line) => /^(import|export)\b/.test(line));
@@ -238,6 +319,12 @@ describe('generated form types (tsc --noEmit consumer check)', () => {
         items: [{ id: 1, label: null }],
         avatar: null,
         callback: null,
+        terms: true,
+        photo: new File([], 'p.jpg'),
+        attachment: null,
+        assigned_role: 'admin',
+        priority: 1,
+        meta: { theme: 'dark' },
       });
 
       // Field types are enforced from the rules.
@@ -246,6 +333,16 @@ describe('generated form types (tsc --noEmit consumer check)', () => {
       const firstId: number = form.data.items[0].id;
       const bio: string | null = form.data.profile.bio;
       const role: 'admin' | 'editor' | 'viewer' = form.data.role;
+
+      // accepted -> boolean; file rule -> File (nullable -> File | null); pin -> verbatim.
+      const terms: boolean = form.data.terms;
+      const photo: File = form.data.photo;
+      const attachment: File | null = form.data.attachment;
+      const meta: Record<string, string> = form.data.meta;
+
+      // Rule::enum() -> the enum's backing-value union.
+      const assignedRole: 'admin' | 'user' | 'guest' = form.data.assigned_role;
+      const priority: 1 | 2 | 3 | 4 = form.data.priority;
 
       // AC2: error keys resolve via FormDataKeys — top-level, nested, and wildcard-array.
       const e1: string | undefined = form.errors['name'];
@@ -258,6 +355,28 @@ describe('generated form types (tsc --noEmit consumer check)', () => {
 
       // @ts-expect-error age is number | null, not string
       const badAge: string = form.data.age;
+
+      // Negative checks that a wrong type is rejected. If any field degraded to \`any\`
+      // instead of its mapped type, the directive below it would be unused and fail tsc,
+      // so these actively prove accepted/file/enum/pin resolution.
+
+      // @ts-expect-error terms is boolean, not string
+      const badTerms: string = form.data.terms;
+
+      // @ts-expect-error photo is File, not string
+      const badPhoto: string = form.data.photo;
+
+      // @ts-expect-error 'nope' is a File field, not a string value
+      form.setData('photo', 'nope');
+
+      // @ts-expect-error 'manager' is outside the RoleValue backing-value union
+      const badRole: typeof form.data.assigned_role = 'manager';
+
+      // @ts-expect-error 5 is outside the PriorityValue backing-value union
+      const badPriority: typeof form.data.priority = 5;
+
+      // @ts-expect-error the meta pin is Record<string, string>, not Record<string, number>
+      const badMeta: Record<string, number> = form.data.meta;
     `;
 
     const { ok, output } = typecheck(ambient, consumer);

@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
-import { parse, relative } from 'node:path';
+import { join, parse, relative } from 'node:path';
 import type { Delivery } from '../delivery/index.js';
 import { logWarn } from '../utils/banner.js';
 import { getPhpFilesRecursive, readFileSafe } from '../utils/file.js';
-import { parseFormRequestRules } from '../utils/php-parser.js';
+import { extractFerryAnnotations, parseFormRequestRules, type EnumDefinition } from '../utils/php-parser.js';
 import { renderKey } from '../utils/ts-keys.js';
+import { collectEnums, ENUMS_MODULE_ID } from './enums.js';
 
 /** The ferry virtual/type module id form-data types are delivered under. */
 export const FORMS_MODULE_ID = '@ferry/forms';
@@ -26,6 +27,8 @@ export type FormInput = {
   className: string;
   /** The `rules()` map (key → tokens), or null when it couldn't be analyzed at all. */
   rules: Record<string, string[]> | null;
+  /** `@ferry <field> <type>` docblock pins: field → raw TS type, emitted verbatim. */
+  annotations: Record<string, string>;
 };
 
 export type FormRegisterOptions = {
@@ -40,6 +43,17 @@ export type FormRegisterOptions = {
 // Rule token → leaf type
 // ---------------------------------------------------------------------------
 
+/** Render an enum backing value as a TS literal: numbers stay numeric, strings get quoted. */
+function renderEnumValue(value: string | number): string {
+  return typeof value === 'number' ? String(value) : `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+}
+
+/** Whether a TypeScript type string references `name` as a whole identifier. */
+function typeContainsName(type: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${escaped}\\b`).test(type);
+}
+
 /**
  * Resolve a field's rule tokens to a leaf type plus its modifiers. `sometimes` makes the key
  * optional; `nullable` unions `null` onto the value. The first token carrying a type signal
@@ -47,7 +61,11 @@ export type FormRegisterOptions = {
  * modifiers, or only an unmappable `Rule::`/closure item ferry dropped — resolves to `null`,
  * signalling the caller to degrade it.
  */
-function resolveTokens(tokens: string[]): { type: string | null; optional: boolean; nullable: boolean } {
+function resolveTokens(
+  tokens: string[],
+  enums: Record<string, EnumDefinition>,
+  knownEnums: Set<string>
+): { type: string | null; optional: boolean; nullable: boolean; enum?: string } {
   const optional = tokens.includes('sometimes');
   const nullable = tokens.includes('nullable');
 
@@ -57,6 +75,25 @@ function resolveTokens(tokens: string[]): { type: string | null; optional: boole
     if (['string', 'email', 'url', 'uuid', 'date'].includes(name)) return { type: 'string', optional, nullable };
     if (['integer', 'numeric', 'decimal'].includes(name)) return { type: 'number', optional, nullable };
     if (['boolean', 'bool'].includes(name)) return { type: 'boolean', optional, nullable };
+    if (name === 'accepted') return { type: 'boolean', optional, nullable };
+    // File-upload rules type as the DOM `File` (Inertia `useForm` file fields are `File`).
+    // `max` stays a generic constraint and is deliberately not mapped here.
+    if (['file', 'image', 'mimes', 'mimetypes', 'dimensions'].includes(name)) {
+      return { type: 'File', optional, nullable };
+    }
+    if (name === 'enum') {
+      // `Rule::enum(SomeEnum::class)` — the field submits the raw backing value, so it types
+      // as the enum's backing-value union. A known ferry enum resolves to the generated
+      // `<Enum>Value` (recorded so the block imports it); a collected-but-not-emitted enum
+      // inlines its union; an unresolvable enum falls through to degrade.
+      const short = token.slice(token.indexOf(':') + 1).trim();
+      if (knownEnums.has(short)) return { type: `${short}Value`, optional, nullable, enum: short };
+      const def = enums[short];
+      if (def && def.cases.length > 0) {
+        return { type: def.cases.map((c) => renderEnumValue(c.value)).join(' | '), optional, nullable };
+      }
+      continue;
+    }
     if (name === 'array') return { type: 'any[]', optional, nullable };
     if (name === 'in') {
       const values = token
@@ -159,10 +196,13 @@ function renderNode(node: TreeNode): string {
  */
 export function buildForms(
   inputs: FormInput[],
-  strict: boolean
-): { forms: Record<string, FormEntry>; warnings: string[] } {
+  strict: boolean,
+  enums: Record<string, EnumDefinition> = {},
+  knownEnums: Set<string> = new Set()
+): { forms: Record<string, FormEntry>; warnings: string[]; enumNames: Set<string> } {
   const forms: Record<string, FormEntry> = {};
   const warnings: string[] = [];
+  const enumNames = new Set<string>();
   const fallback = strict ? 'unknown' : 'any';
 
   for (const input of inputs) {
@@ -176,7 +216,14 @@ export function buildForms(
 
     const resolved: ResolvedField[] = [];
     for (const [key, tokens] of Object.entries(input.rules)) {
-      const { type, optional, nullable } = resolveTokens(tokens);
+      // Annotation pin wins verbatim over rule-derived types and clears the degrade warning.
+      if (input.annotations[key] !== undefined) {
+        resolved.push({ key, type: input.annotations[key], optional: tokens.includes('sometimes'), nullable: false });
+        continue;
+      }
+
+      const { type, optional, nullable, enum: enumUsed } = resolveTokens(tokens, enums, knownEnums);
+      if (enumUsed) enumNames.add(enumUsed);
       if (type === null) {
         warnings.push(`${input.className}.${key} has no rule ferry can map to a type; typed as \`${fallback}\`.`);
         resolved.push({ key, type: fallback, optional, nullable: false });
@@ -194,7 +241,7 @@ export function buildForms(
     forms[input.className] = { kind: 'shape', fields };
   }
 
-  return { forms, warnings };
+  return { forms, warnings, enumNames };
 }
 
 // ---------------------------------------------------------------------------
@@ -229,13 +276,36 @@ function renderFormType(name: string, entry: FormEntry): string {
  * per FormRequest, named by the class's verbatim short name. The data shape alone is emitted —
  * consumers derive typed `form.errors` keys from it via Inertia's `FormDataKeys<TForm>`.
  */
-export function generateFormsDtsBlock(forms: Record<string, FormEntry>): string {
+export function generateFormsDtsBlock(
+  forms: Record<string, FormEntry>,
+  enumNames: Set<string> = new Set()
+): string {
   const names = Object.keys(forms).sort();
   if (names.length === 0) {
     return `declare module '${FORMS_MODULE_ID}' {}`;
   }
 
-  const inner = names.map((name) => renderFormType(name, forms[name])).join('\n\n');
+  // Only import the `<Enum>Value` types actually referenced by a rendered field type. The
+  // import is block-scoped, so it does NOT flip the ambient file to module mode.
+  const used = new Set<string>();
+  for (const name of names) {
+    const entry = forms[name];
+    if (entry.kind !== 'shape') continue;
+    for (const field of Object.values(entry.fields)) {
+      for (const enumName of enumNames) {
+        if (typeContainsName(field.type, `${enumName}Value`)) used.add(`${enumName}Value`);
+      }
+    }
+  }
+
+  const parts: string[] = [];
+  if (used.size > 0) {
+    parts.push(`import { ${[...used].sort().join(', ')} } from '${ENUMS_MODULE_ID}';`);
+    parts.push('');
+  }
+  parts.push(names.map((name) => renderFormType(name, forms[name])).join('\n\n'));
+
+  const inner = parts.join('\n');
   return `declare module '${FORMS_MODULE_ID}' {\n${indentBlock(inner)}\n}`;
 }
 
@@ -276,7 +346,11 @@ export function collectFormInputs(options: { requestsDir: string; cwd: string; s
 
     try {
       const content = readFileSafe(filePath) || '';
-      inputs.push({ className, rules: parseFormRequestRules(content) });
+      inputs.push({
+        className,
+        rules: parseFormRequestRules(content),
+        annotations: extractFerryAnnotations(content),
+      });
     } catch (e) {
       logWarn('forms', `Failed to parse form request file: ${relativePhpPath} (${e})`);
     }
@@ -296,10 +370,15 @@ export function collectFormInputs(options: { requestsDir: string; cwd: string; s
  * request-file changes in dev. Does not write the ambient file; the caller runs `writeTypes()`.
  */
 export function registerForms({ requestsDir, cwd, delivery, strict = false }: FormRegisterOptions): void {
+  // The enums ferry actually generates into `@ferry/enums`. A `Rule::enum(...)` reference is
+  // resolved to `<Enum>Value` only when its short name is in this set.
+  const enums = collectEnums(join(cwd, 'app/Enums'), cwd);
+  const knownEnums = new Set(Object.keys(enums));
+
   const inputs = collectFormInputs({ requestsDir, cwd, strict });
-  const { forms, warnings } = buildForms(inputs, strict);
+  const { forms, warnings, enumNames } = buildForms(inputs, strict, enums, knownEnums);
   for (const warning of warnings) logWarn('forms', warning);
 
   delivery.virtual.register(FORMS_MODULE_ID, FORM_RUNTIME);
-  delivery.dts.register(FORMS_MODULE_ID, generateFormsDtsBlock(forms));
+  delivery.dts.register(FORMS_MODULE_ID, generateFormsDtsBlock(forms, enumNames));
 }
