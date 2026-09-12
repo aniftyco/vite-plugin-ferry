@@ -488,17 +488,31 @@ export type PageEntry = {
   type: string;
 };
 
+/** One `FerryPageMap` entry: a verbatim render key and the normalized type name it resolves to. */
+export type PageMapEntry = {
+  key: string;
+  typeName: string;
+};
+
 /**
- * Group render inputs by their PROPS TYPE NAME and build one page entry each. A page
- * rendered from several actions — and distinct render keys that normalize to the same
- * type name (`'Users/Show'` and `'users/show'` both → `UsersShowProps`) — merge into the
- * UNION of their distinct render shapes, so the generated block never emits two
- * `export type` declarations under one name (which would be a TS2300 collision). Warnings
- * for degraded props are collected. Never throws.
+ * Group render inputs by their PROPS TYPE NAME and build one page entry each. The type name
+ * normalizes casing — `pageKeyToTypeName` PascalCases every segment, so `'Users/Show'` and
+ * `'users/show'` share the one named type `UsersShowProps`. A page rendered from several
+ * actions (including distinct render keys that normalize together) merges into the UNION of its
+ * distinct render shapes, so the generated block never emits two `export type` declarations
+ * under one name (which would be a TS2300 collision). `pageMap` carries every DISTINCT VERBATIM
+ * render key — exactly as written in `Inertia::render(...)` — paired with its normalized type
+ * name, backing the literal-keyed `FerryPageMap`; two verbatim keys that normalize together both
+ * appear, both pointing at the shared type. Warnings for degraded props are collected. Never
+ * throws.
  */
-export function buildPages(inputs: RenderInput[], strict: boolean): { pages: PageEntry[]; warnings: string[] } {
+export function buildPages(
+  inputs: RenderInput[],
+  strict: boolean
+): { pages: PageEntry[]; pageMap: PageMapEntry[]; warnings: string[] } {
   const warnings: string[] = [];
   const byTypeName = new Map<string, string[]>();
+  const keyToTypeName = new Map<string, string>();
 
   for (const input of inputs) {
     const typeName = pageKeyToTypeName(input.key);
@@ -506,6 +520,7 @@ export function buildPages(inputs: RenderInput[], strict: boolean): { pages: Pag
     const shapes = byTypeName.get(typeName) ?? [];
     shapes.push(shape);
     byTypeName.set(typeName, shapes);
+    keyToTypeName.set(input.key, typeName);
   }
 
   const pages: PageEntry[] = [...byTypeName.keys()].sort().map((typeName) => ({
@@ -513,7 +528,11 @@ export function buildPages(inputs: RenderInput[], strict: boolean): { pages: Pag
     type: [...new Set(byTypeName.get(typeName)!)].join(' | '),
   }));
 
-  return { pages, warnings };
+  const pageMap: PageMapEntry[] = [...keyToTypeName.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, typeName]) => ({ key, typeName }));
+
+  return { pages, pageMap, warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -595,13 +614,17 @@ function referenceImports(types: string[], knownResources: Set<string>, knownEnu
 
 /**
  * The `declare module '@ferry/pages'` block for the ambient `index.d.ts`: one
- * `export type <Page>Props` per page. Referenced resource/enum types are imported inside
+ * `export type <Page>Props` per page, plus (when `pageMap` is given) the literal-keyed
+ * `FerryPageMap` interface and the `PropsFor<K>` lookup alias — the string-key alternative
+ * to importing a named props type. Map values reference the named types declared in the same
+ * block, so no extra imports are needed. Referenced resource/enum types are imported inside
  * the block, keeping the ambient file script-style.
  */
 export function generatePagesDtsBlock(
   pages: PageEntry[],
   knownResources: Set<string>,
-  knownEnums: Set<string>
+  knownEnums: Set<string>,
+  pageMap: PageMapEntry[] = []
 ): string {
   if (pages.length === 0) {
     return `declare module '${PAGES_MODULE_ID}' {}`;
@@ -614,7 +637,18 @@ export function generatePagesDtsBlock(
   );
   const decls = pages.map((p) => `export type ${p.typeName} = ${p.type};`);
 
-  const inner = imports.length > 0 ? [...imports, '', ...decls].join('\n') : decls.join('\n');
+  const mapLines =
+    pageMap.length > 0
+      ? [
+          'export interface FerryPageMap {',
+          ...pageMap.map(({ key, typeName }) => `  ${renderKey(key)}: ${typeName};`),
+          '}',
+          'export type PropsFor<K extends keyof FerryPageMap> = FerryPageMap[K];',
+        ]
+      : [];
+
+  const body = mapLines.length > 0 ? [...decls, '', ...mapLines] : decls;
+  const inner = imports.length > 0 ? [...imports, '', ...body].join('\n') : body.join('\n');
   return `declare module '${PAGES_MODULE_ID}' {\n${indentBlock(inner)}\n}`;
 }
 
@@ -676,14 +710,14 @@ export function registerPages({
   const renderInputs = collectRenderInputs({ controllersDir, resourcesDir, modelsDir, enumsDir, knownEnums });
   const sharedInput = collectSharedInput({ middlewareDir, resourcesDir, modelsDir, enumsDir, knownEnums });
 
-  const { pages, warnings } = buildPages(renderInputs, strict);
+  const { pages, pageMap, warnings } = buildPages(renderInputs, strict);
   const sharedWarnings: string[] = [];
   const sharedFields = finalizeFields('share()', sharedInput.fields, strict, sharedWarnings);
 
   for (const warning of [...warnings, ...sharedWarnings]) logWarn('pages', warning);
 
   delivery.virtual.register(PAGES_MODULE_ID, PAGES_RUNTIME);
-  delivery.dts.register(PAGES_MODULE_ID, generatePagesDtsBlock(pages, knownResources, knownEnums));
+  delivery.dts.register(PAGES_MODULE_ID, generatePagesDtsBlock(pages, knownResources, knownEnums, pageMap));
   delivery.moduleFiles.register(
     INERTIA_AUGMENTATION_FILE,
     generateInertiaAugmentation(sharedFields, knownResources, knownEnums)

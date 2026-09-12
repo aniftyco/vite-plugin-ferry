@@ -321,19 +321,51 @@ describe('generatePagesDtsBlock', () => {
   it('emits an empty declare module block when there are no pages', () => {
     expect(generatePagesDtsBlock([], knownResources, knownEnums)).toBe(`declare module '@ferry/pages' {}`);
   });
+
+  it('emits FerryPageMap (verbatim keys → named types) and the PropsFor<K> lookup alias', () => {
+    const pages: PageEntry[] = [
+      { typeName: 'UsersShowProps', type: '{ user: UserResource }' },
+      { typeName: 'AccountSettingsProps', type: '{ theme: string }' },
+    ];
+    const pageMap = [
+      { key: 'Users/Show', typeName: 'UsersShowProps' },
+      { key: 'account/settings', typeName: 'AccountSettingsProps' },
+    ];
+
+    const block = generatePagesDtsBlock(pages, knownResources, knownEnums, pageMap);
+
+    expect(block).toContain('export interface FerryPageMap {');
+    // Keys are the verbatim render strings (quoted), values reference the named types.
+    expect(block).toContain(`"Users/Show": UsersShowProps;`);
+    expect(block).toContain(`"account/settings": AccountSettingsProps;`);
+    expect(block).toContain('export type PropsFor<K extends keyof FerryPageMap> = FerryPageMap[K];');
+    // The named types remain for back-compat.
+    expect(block).toContain('export type UsersShowProps = { user: UserResource };');
+  });
+
+  it('omits FerryPageMap when no page map is supplied (back-compat with the 3-arg call)', () => {
+    const pages: PageEntry[] = [{ typeName: 'UsersShowProps', type: '{ user: UserResource }' }];
+    const block = generatePagesDtsBlock(pages, knownResources, knownEnums);
+
+    expect(block).not.toContain('FerryPageMap');
+    expect(block).not.toContain('PropsFor');
+  });
 });
 
-describe('page-key → type-name collisions', () => {
-  // Two distinct render keys that normalize to the same props type name.
+describe('page-key normalization + verbatim map keys', () => {
+  // Casing variants of one render key, each rendering a different shape from a different action.
   const inputs: RenderInput[] = [
     { key: 'Users/Show', fields: { id: { type: 'number', optional: false } } },
     { key: 'users/show', fields: { slug: { type: 'string', optional: false } } },
   ];
 
-  it('merges colliding keys into one export type (a union of shapes), never a duplicate declaration', () => {
+  it('normalizes casing to ONE named type (a union of shapes), never a duplicate declaration', () => {
     const { pages } = buildPages(inputs, false);
+
+    // Casing variants share one named type — `pageKeyToTypeName` PascalCases every segment.
     expect(pages).toHaveLength(1);
     expect(pages[0].typeName).toBe('UsersShowProps');
+    // Both shapes rendered under that normalized name union together.
     expect(pages[0].type).toBe('{ id: number } | { slug: string }');
 
     const block = generatePagesDtsBlock(pages, knownResources, knownEnums);
@@ -341,10 +373,27 @@ describe('page-key → type-name collisions', () => {
     expect(declarations).toHaveLength(1);
   });
 
-  it('produces a compilable block — no TS2300 duplicate-identifier from the collision', () => {
-    const { pages } = buildPages(inputs, false);
+  it('keeps BOTH verbatim keys in the map, both resolving to the shared normalized type', () => {
+    const { pageMap } = buildPages(inputs, false);
+
+    expect(pageMap).toEqual([
+      { key: 'Users/Show', typeName: 'UsersShowProps' },
+      { key: 'users/show', typeName: 'UsersShowProps' },
+    ]);
+  });
+
+  it('keeps the map key verbatim, pairing it with its own normalized type name (no key transform)', () => {
+    // `pageKeyToTypeName` only uppercases the first char of each segment, so interior casing is
+    // preserved: `uSeRs` -> `USeRs`. The map KEY stays exactly as rendered regardless.
+    const { pageMap } = buildPages([{ key: 'uSeRs/show', fields: {} }], false);
+
+    expect(pageMap).toEqual([{ key: 'uSeRs/show', typeName: 'USeRsShowProps' }]);
+  });
+
+  it('produces a compilable block — no TS2300 duplicate-identifier from the shared name', () => {
+    const { pages, pageMap } = buildPages(inputs, false);
     const ambient = assembleAmbientTypes({
-      blocks: [ENUM_BASE_DTS, generatePagesDtsBlock(pages, knownResources, knownEnums)],
+      blocks: [ENUM_BASE_DTS, generatePagesDtsBlock(pages, knownResources, knownEnums, pageMap)],
     });
 
     const consumer = dedent`
@@ -439,6 +488,8 @@ describe('generated page types (tsc --noEmit consumer check)', () => {
     { typeName: 'UsersShowProps', type: '{ id: number; status: OrderStatus; user?: UserResource }' },
   ];
 
+  const pageMap = [{ key: 'Users/Show', typeName: 'UsersShowProps' }];
+
   const shared: Record<string, PropField> = {
     auth: { type: '{ user: UserResource }', optional: false },
     appName: { type: 'string', optional: false },
@@ -452,7 +503,7 @@ describe('generated page types (tsc --noEmit consumer check)', () => {
       generateEnumsDts({ OrderStatus: orderStatus }),
       generateRoutesDts(routeTable),
       generateResourcesDtsBlock(resources, new Set(['OrderStatus'])),
-      generatePagesDtsBlock(pages, knownResources, new Set(['OrderStatus'])),
+      generatePagesDtsBlock(pages, knownResources, new Set(['OrderStatus']), pageMap),
     ],
     moduleFiles: [{ fileName: 'inertia.d.ts', content: augmentation }],
   });
@@ -470,7 +521,7 @@ describe('generated page types (tsc --noEmit consumer check)', () => {
     const consumer = dedent`
       import '@inertiajs/core';
       import type { SharedPageProps, ErrorValue } from '@inertiajs/core';
-      import type { UsersShowProps } from '@ferry/pages';
+      import type { UsersShowProps, PropsFor } from '@ferry/pages';
       import { OrderStatus } from '@ferry/enums';
 
       // The augmentation flows into Inertia's own SharedPageProps.
@@ -497,6 +548,15 @@ describe('generated page types (tsc --noEmit consumer check)', () => {
 
       // @ts-expect-error a deferred prop is possibly undefined until narrowed
       const eager: number = page.props.user.id;
+
+      // The PropsFor<'...'> literal alternative resolves to the SAME props as the named type,
+      // keyed by the verbatim render string.
+      const literalPage = usePage<PropsFor<'Users/Show'>>();
+      const literalId: number = literalPage.props.id;
+      const literalStatus: OrderStatus = literalPage.props.status;
+
+      // @ts-expect-error PropsFor resolves to the real props: id is a number, not a string
+      const literalBad: string = literalPage.props.id;
 
       // routes' declarations still coexist in the same ambient file.
       const url: string = route('users.show', { user: 1 }).url;
