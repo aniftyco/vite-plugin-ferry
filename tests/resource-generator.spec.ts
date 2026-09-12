@@ -269,6 +269,26 @@ describe('mergeResourceFields', () => {
     expect(fields.meta.type).toBe('Record<string, string>');
     expect(warnings).toHaveLength(0);
   });
+
+  it('a @ferry pin over a paginatorUnresolved field clears its warning', () => {
+    const warnings: string[] = [];
+    const fields = mergeResourceFields({
+      resourceName: 'OrderResource',
+      model: 'Order',
+      staticFields: {
+        items: { type: 'OrderResource[]', optional: false, paginatorUnresolved: true },
+      },
+      metadata: {},
+      annotations: { items: 'LengthAwarePaginated<OrderResource>' },
+      strict: false,
+      knownEnums,
+      enumNames: new Set(),
+      warnings,
+    });
+
+    expect(fields.items.type).toBe('LengthAwarePaginated<OrderResource>');
+    expect(warnings).toHaveLength(0);
+  });
 });
 
 describe('buildResources', () => {

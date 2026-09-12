@@ -724,6 +724,49 @@ describe('Resource::collection(...) over a paginator in a page prop (issue #27)'
     expect(warnings.some((w) => w.includes('Orders/Index.orders') && w.includes('paginator kind'))).toBe(true);
   });
 
+  it('a @ferry pin to a paginator type clears the paginatorUnresolved warning', () => {
+    const { dir, controllersDir } = scratch();
+    try {
+      writeFileSync(
+        join(controllersDir, 'OrderController.php'),
+        dedent`
+          <?php
+          namespace App\\Http\\Controllers;
+          use App\\Http\\Resources\\OrderResource;
+          use Inertia\\Inertia;
+          class OrderController extends Controller {
+              /**
+               * @ferry orders LengthAwarePaginated<OrderResource>
+               */
+              public function index() {
+                  return Inertia::render('Orders/Index', [
+                      'orders' => OrderResource::collection($orders),
+                  ]);
+              }
+          }
+        `,
+        'utf8'
+      );
+
+      const inputs = collectRenderInputs({
+        controllersDir,
+        resourcesDir: join(fixturesDir, 'Resources'),
+        modelsDir: join(fixturesDir, 'Models'),
+        enumsDir: join(fixturesDir, 'Enums'),
+        knownEnums,
+      });
+
+      const page = inputs.find((i) => i.key === 'Orders/Index')!;
+      expect(page.fields.orders.type).toBe('LengthAwarePaginated<OrderResource>');
+      expect(page.fields.orders.paginatorUnresolved).toBe(false);
+
+      const { warnings } = buildPages(inputs, false);
+      expect(warnings.some((w) => w.includes('Orders/Index.orders') && w.includes('paginator kind'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('proves the envelope is real, checked shape — not any — via a negative tsc assertion', () => {
     const pages: PageEntry[] = [
       { typeName: 'OrdersIndexProps', type: '{ orders: LengthAwarePaginated<UserResource> }' },

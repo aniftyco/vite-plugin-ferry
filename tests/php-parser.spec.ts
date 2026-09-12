@@ -565,6 +565,53 @@ describe('Resource::collection(...) paginator detection (issue #27)', () => {
     expect(result!.items.type).toBe('UserResource[]');
     expect(result!.items.paginatorUnresolved).toBeUndefined();
   });
+
+  it('looks through ->withQueryString() to the underlying ->paginate() (length-aware)', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->paginate(25)->withQueryString()'), {
+      resourcesDir,
+    });
+    expect(result!.items).toMatchObject({ type: 'LengthAwarePaginated<UserResource>' });
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('looks through ->appends([...]) to the underlying ->simplePaginate() (simple)', () => {
+    const result = parseResourceFieldsAst(
+      collectionContent('$this->users()->simplePaginate()->appends(["q" => "x"])'),
+      { resourcesDir }
+    );
+    expect(result!.items).toMatchObject({ type: 'SimplePaginated<UserResource>' });
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('looks through ->withQueryString() to the underlying ->cursorPaginate() (cursor)', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->cursorPaginate()->withQueryString()'), {
+      resourcesDir,
+    });
+    expect(result!.items).toMatchObject({ type: 'CursorPaginated<UserResource>' });
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('looks through multiple chained pass-throughs to the underlying ->paginate()', () => {
+    const result = parseResourceFieldsAst(
+      collectionContent('$this->users()->paginate(25)->withQueryString()->appends(["q" => "x"])'),
+      { resourcesDir }
+    );
+    expect(result!.items).toMatchObject({ type: 'LengthAwarePaginated<UserResource>' });
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('does NOT classify a pass-through over ->get() as an envelope — it behaves like the underlying', () => {
+    const result = parseResourceFieldsAst(collectionContent('$this->users()->get()->withQueryString()'), {
+      resourcesDir,
+    });
+    expect(result!.items.type).toBe('UserResource[]');
+    expect(result!.items.paginatorUnresolved).toBeUndefined();
+  });
+
+  it('does NOT classify a pass-through over a bare variable as an envelope (flags it as unresolved instead)', () => {
+    const result = parseResourceFieldsAst(collectionContent('$users->withQueryString()'), { resourcesDir });
+    expect(result!.items).toMatchObject({ type: 'UserResource[]', paginatorUnresolved: true });
+  });
 });
 
 describe('resourceMergesParent', () => {

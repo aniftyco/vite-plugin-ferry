@@ -3,7 +3,6 @@ import { basename, join } from 'node:path';
 import type { Delivery } from '../delivery/index.js';
 import { logWarn } from '../utils/banner.js';
 import { getPhpFilesRecursive, readFileSafe } from '../utils/file.js';
-import { renderKey } from '../utils/ts-keys.js';
 import {
   parsePhp,
   findAllNodesByKind,
@@ -14,6 +13,7 @@ import {
   extractFerryAnnotations,
   type ResourceFieldInfo,
 } from '../utils/php-parser.js';
+import { renderKey } from '../utils/ts-keys.js';
 import { collectEnums } from './enums.js';
 
 /** The ferry virtual/type module id per-page prop types are delivered under. */
@@ -308,7 +308,12 @@ export function collectRenderInputs(options: {
           // name in the pin text is rewritten to its `<Enum>Value` backing-value union.
           for (const [prop, type] of Object.entries(annotations)) {
             if (fields[prop]) {
-              fields[prop] = { ...fields[prop], type: rewriteEnumPin(type, knownEnums), undecidable: false };
+              fields[prop] = {
+                ...fields[prop],
+                type: rewriteEnumPin(type, knownEnums),
+                undecidable: false,
+                paginatorUnresolved: false,
+              };
             }
           }
 
@@ -335,8 +340,7 @@ function findShareMethod(classNode: any): any {
 function referencesParentShare(body: any): boolean {
   const lookups = findAllNodesByKind(body, 'staticlookup') as any[];
   return lookups.some(
-    (n) =>
-      n.what?.kind === 'parentreference' && (n.offset?.kind === 'identifier' ? n.offset.name : null) === 'share'
+    (n) => n.what?.kind === 'parentreference' && (n.offset?.kind === 'identifier' ? n.offset.name : null) === 'share'
   );
 }
 
@@ -410,7 +414,7 @@ function collectShareFields(
   for (const [prop, rawType] of Object.entries(extractFerryAnnotations(methodDocText(method)))) {
     const type = rewriteEnumPin(rawType, inferOptions.knownEnums);
     fields[prop] = fields[prop]
-      ? { ...fields[prop], type, undecidable: false }
+      ? { ...fields[prop], type, undecidable: false, paginatorUnresolved: false }
       : { type, optional: false, undecidable: false };
   }
 

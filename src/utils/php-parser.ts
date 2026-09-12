@@ -563,28 +563,62 @@ const PAGINATOR_METHODS: Record<string, PaginatorKind> = {
   cursorPaginate: 'cursor',
 };
 
+/** Paginator methods that return `$this` (the same paginator instance), so a chain ending in one
+ * is still the paginator produced earlier in the chain. `Resource::collection(...)` sees the same
+ * envelope through them, so the classifier looks THROUGH these to the underlying
+ * `paginate`/`simplePaginate`/`cursorPaginate` call. `->withQueryString()` in particular is
+ * load-bearing (it carries the current query string onto the pagination links). */
+const PAGINATOR_PASSTHROUGH_METHODS = new Set([
+  'withQueryString',
+  'appends',
+  'withPath',
+  'setPageName',
+  'fragment',
+  'onEachSide',
+]);
+
 /**
  * Detect the paginator kind a `Resource::collection(...)` argument's expression resolves to:
- * whether the argument ITSELF is a direct call to `paginate`/`simplePaginate`/`cursorPaginate`.
- * STRUCTURAL and shallow on purpose — a PHP method chain's outermost node is always the
+ * whether the argument is (or, through paginator pass-through methods, wraps) a call to
+ * `paginate`/`simplePaginate`/`cursorPaginate`. A PHP method chain's outermost node is the
  * last-called method (`$q->where(...)->paginate()` is itself a `call` whose own offset name is
- * `paginate`), so no recursion into the chain is needed, and none is done: a
- * `paginate()`/etc. call nested inside a CLOSURE or a nested call's ARGUMENTS (e.g.
- * `$this->whenLoaded('x', fn () => $q->paginate())`) is a different expression's result, not
- * this argument's own shape, and must NOT be detected as this field's envelope. There is also
- * no symbol table, so a typed `LengthAwarePaginator $p` variable passed as the arg is out of
- * reach and resolves to `null` here (the caller warns and falls back to the plain array type).
+ * `paginate`), so a chain ending in the paginator call resolves directly. When the outer call is
+ * instead a paginator pass-through (`->paginate(25)->withQueryString()`), the classifier walks
+ * the method-chain SPINE — the object each method was called on (`.what`) — looking through the
+ * pass-throughs until it hits the underlying paginator call (→ that kind) or runs out of chain
+ * (→ null). Only the spine is walked: a `paginate()`/etc. call nested inside a CLOSURE or a
+ * nested call's ARGUMENTS (e.g. `$this->whenLoaded('x', fn () => $q->paginate())`) is a
+ * different expression's result, not this argument's own shape, and is never descended into.
+ * There is also no symbol table, so a typed `LengthAwarePaginator $p` variable passed as the arg
+ * is out of reach and resolves to `null` here (the caller warns and falls back to the plain
+ * array type).
  */
 export function paginatorKindOfArgument(node: PhpParserTypes.Node): PaginatorKind | null {
-  if (node.kind !== 'call') return null;
+  let current: PhpParserTypes.Node = node;
 
-  const call = node as PhpParserTypes.Call;
-  if (call.what.kind !== 'propertylookup' && call.what.kind !== 'staticlookup') return null;
+  while (current.kind === 'call') {
+    const call = current as PhpParserTypes.Call;
+    if (call.what.kind !== 'propertylookup' && call.what.kind !== 'staticlookup') return null;
 
-  const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
-  const offset = lookup.offset;
-  const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
-  return (name && PAGINATOR_METHODS[name]) || null;
+    const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
+    const offset = lookup.offset;
+    const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+    if (!name) return null;
+
+    const kind = PAGINATOR_METHODS[name];
+    if (kind) return kind;
+
+    // Look through a pass-through method to the object it was called on, staying on the chain
+    // spine — never into the method's own arguments or a closure.
+    if (PAGINATOR_PASSTHROUGH_METHODS.has(name)) {
+      current = lookup.what;
+      continue;
+    }
+
+    return null;
+  }
+
+  return null;
 }
 
 /** Method names that resolve to a plain collection/value, never a paginator, so an unresolved
@@ -636,7 +670,10 @@ const NON_PAGINATOR_METHODS = new Set([
  * False for a plain property read (`$this->orders`, `$user->orders`) — ordinary relation
  * access, which Eloquent always serializes as a Collection, not a paginator — and false for a
  * chain whose own outer call is a known non-paginator method (a resource conditional helper, or
- * a terminal Eloquent/Collection method that always yields a plain collection).
+ * a terminal Eloquent/Collection method that always yields a plain collection). A paginator
+ * pass-through method (`->withQueryString()`, ...) is looked through to the underlying chain, so
+ * a pass-through over a non-paginator (`->get()->withQueryString()`) behaves like the underlying
+ * and doesn't spuriously flag.
  */
 function looksLikePotentialPaginator(node: PhpParserTypes.Node): boolean {
   if (node.kind === 'variable') return true;
@@ -647,6 +684,11 @@ function looksLikePotentialPaginator(node: PhpParserTypes.Node): boolean {
       const lookup = call.what as unknown as PhpParserTypes.PropertyLookup;
       const offset = lookup.offset;
       const name = offset.kind === 'identifier' ? (offset as PhpParserTypes.Identifier).name : null;
+      // Look through a pass-through to the object it was called on — the flag should reflect the
+      // underlying chain, not the pass-through itself.
+      if (name && PAGINATOR_PASSTHROUGH_METHODS.has(name)) {
+        return looksLikePotentialPaginator(lookup.what);
+      }
       return !(name && NON_PAGINATOR_METHODS.has(name));
     }
     return true;
