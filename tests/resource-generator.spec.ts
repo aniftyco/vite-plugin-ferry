@@ -1099,14 +1099,120 @@ describe('bare parameter-less casts agree between the offline and DB paths', () 
     // Inline TS-shape cast passes through verbatim.
     expect(f.meta).toEqual({ type: '{ label: string; score: number }', optional: false });
 
-    // An enum/class cast still resolves through enum lookup (the enum name), not mapBaseCastToTs.
+    // An enum/class cast resolves through enum lookup to the `<Enum>Value` backing-value union
+    // (not mapBaseCastToTs, and not the bare enum class name).
     const orderContent = readFileSync(join(fixturesDir, 'Resources', 'OrderResource.php'), 'utf8');
     const orderFields = parseResourceFieldsAst(orderContent, {
       resourcesDir: join(fixturesDir, 'Resources'),
       modelsDir: join(fixturesDir, 'Models'),
       enumsDir: join(fixturesDir, 'Enums'),
     });
-    expect(orderFields?.status.type).toBe('OrderStatus');
+    expect(orderFields?.status.type).toBe('OrderStatusValue');
+  });
+});
+
+describe('offline enum-cast column resolves to the <Enum>Value union (not the bare enum name)', () => {
+  // An enum-cast column whose type comes PURELY from the cast — no `@return`/`@ferry` docblock to
+  // mask it — on the OFFLINE path (empty metadata). The `@mixin` fixes the backing model without
+  // seeding a docblock shape. Before the fix this typed as the bare `OrderStatus`, which the
+  // `${enum}Value` import scan never imports (→ `Cannot find name 'OrderStatus'`) and which
+  // disagrees with the DB path and pins (both `OrderStatusValue`).
+  const statusEnum: EnumDefinition = {
+    name: 'OrderStatus',
+    backing: 'string',
+    cases: [
+      { key: 'PENDING', value: 'pending' },
+      { key: 'SHIPPED', value: 'shipped' },
+    ],
+  };
+
+  function scratchInputs() {
+    const dir = mkdtempSync(join(tmpdir(), 'ferry-enum-cast-'));
+    const resourcesDir = join(dir, 'Resources');
+    const modelsDir = join(dir, 'Models');
+    const enumsDir = join(dir, 'Enums');
+    mkdirSync(resourcesDir, { recursive: true });
+    mkdirSync(modelsDir, { recursive: true });
+    mkdirSync(enumsDir, { recursive: true });
+
+    writeFileSync(
+      join(enumsDir, 'OrderStatus.php'),
+      "<?php\nnamespace App\\Enums;\nenum OrderStatus: string {\n  case PENDING = 'pending';\n  case SHIPPED = 'shipped';\n}\n",
+      'utf8'
+    );
+    writeFileSync(
+      join(modelsDir, 'Order.php'),
+      '<?php\nnamespace App\\Models;\nuse App\\Enums\\OrderStatus;\nuse Illuminate\\Database\\Eloquent\\Model;\nclass Order extends Model {\n  protected $casts = ["status" => OrderStatus::class];\n}\n',
+      'utf8'
+    );
+    // No @return/@ferry mask — status' type comes only from the model cast.
+    writeFileSync(
+      join(resourcesDir, 'OrderStatusCastResource.php'),
+      '<?php\nnamespace App\\Http\\Resources;\nuse Illuminate\\Http\\Request;\nuse Illuminate\\Http\\Resources\\Json\\JsonResource;\n/**\n * @mixin \\App\\Models\\Order\n */\nclass OrderStatusCastResource extends JsonResource {\n  public function toArray(Request $request): array {\n    return ["status" => $this->resource->status];\n  }\n}\n',
+      'utf8'
+    );
+
+    return collectResourceInputs({ resourcesDir, modelsDir, enumsDir, cwd: dir });
+  }
+
+  const inputs = scratchInputs();
+  const knownEnums = new Set(['OrderStatus']);
+
+  const orderMeta: MetadataDump = {
+    Order: {
+      table: 'orders',
+      columns: [{ name: 'status', type_name: 'varchar', nullable: false, default: null }],
+      casts: { status: 'App\\Enums\\OrderStatus' },
+      appends: [],
+      hidden: [],
+      visible: [],
+    },
+  };
+
+  function statusField(metadataDump: MetadataDump): { type: string; optional: boolean } {
+    const { resources } = buildResources(inputs, metadataDump, false, knownEnums);
+    const entry = resources.OrderStatusCastResource;
+    expect(entry?.kind).toBe('shape');
+    return (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields.status;
+  }
+
+  it('types the enum-cast column as the <Enum>Value union on the offline path', () => {
+    // Reverting the fix makes this the bare `OrderStatus`, failing here.
+    expect(statusField({})).toEqual({ type: 'OrderStatusValue', optional: false });
+  });
+
+  it('imports OrderStatusValue into the generated @ferry/resources block', () => {
+    const { resources, enumNames } = buildResources(inputs, {}, false, knownEnums);
+    const block = generateResourcesDtsBlock(resources, enumNames);
+    expect(block).toContain(`import { OrderStatusValue } from '@ferry/enums';`);
+    // The bare enum name is never referenced (that was the unimported, undefined identifier).
+    expect(block).not.toMatch(/\bstatus: OrderStatus\b(?!Value)/);
+  });
+
+  it('agrees with the DB-metadata path (offline == DB)', () => {
+    const offline = statusField({});
+    const fromDb = statusField(orderMeta);
+    expect(fromDb).toEqual(offline);
+    expect(fromDb.type).toBe('OrderStatusValue');
+  });
+
+  it('compiles: the offline block references only the imported OrderStatusValue (tsc --noEmit)', () => {
+    const { resources, enumNames } = buildResources(inputs, {}, false, knownEnums);
+    const block = generateResourcesDtsBlock(resources, enumNames);
+    const ambient = assembleAmbientTypes({
+      blocks: [ENUM_BASE_DTS, generateEnumsDts({ OrderStatus: statusEnum }), block],
+    });
+
+    const consumer = dedent`
+      import type { OrderStatusCastResource } from '@ferry/resources';
+      const r = {} as OrderStatusCastResource;
+      const s: 'pending' | 'shipped' = r.status;
+      void s;
+    `;
+
+    // skipLibCheck=false so the block itself is checked — a bare, unimported enum name would error.
+    const { ok, output } = typecheck(ambient, consumer, false);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
   });
 });
 

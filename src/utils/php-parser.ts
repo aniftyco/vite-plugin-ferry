@@ -910,7 +910,11 @@ export function extractExtendsShortName(phpContent: string): string | null {
 }
 
 /**
- * Map a PHP cast to a TypeScript type, potentially collecting enum references.
+ * Map a PHP cast to a TypeScript type, potentially collecting enum references. An enum cast
+ * resolves to the enum's `<Enum>Value` backing-value union — the shape the value actually takes
+ * over JSON, and the same representation the metadata (DB) path (`resolveCast`) and `@ferry` pins
+ * (`rewriteEnumPin`) emit. The bare `def.name` is recorded in `collectedEnums` (so the caller
+ * still reports the enum for the `${name}Value` import scan), but never emitted as the field type.
  */
 function mapCastToType(cast: string, enumsDir: string, collectedEnums: Record<string, EnumDefinition>): string {
   const original = cast;
@@ -926,7 +930,7 @@ function mapCastToType(cast: string, enumsDir: string, collectedEnums: Record<st
       const def = parseEnumContent(content);
       if (def) {
         collectedEnums[def.name] = def;
-        return def.name;
+        return `${def.name}Value`;
       }
     }
   }
@@ -993,7 +997,8 @@ function resolveColumnField(prop: string, optional: boolean, options: ParseResou
           // parameter-less base (`encrypted`, `object`, `collection`, `timestamp`, ...) — is mapped
           // by its BASE cast name so the offline path agrees with the metadata (DB) path; emitting
           // it verbatim would produce invalid TS (`quantity: decimal:5;`) or a bare `any`. An
-          // enum/class cast (`OrderStatus`, `Foo::class`) still resolves through `mapCastToType`.
+          // enum/class cast (`OrderStatus`, `Foo::class`) resolves through `mapCastToType`, which
+          // yields the `<Enum>Value` backing-value union — matching the DB path and `@ferry` pins.
           const isTsShape = trim.startsWith('{') || /^array\s*\{/.test(trim) || /^Array\s*</.test(trim);
           const isParameterizedCast = /^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trim);
           const tsType = isTsShape
