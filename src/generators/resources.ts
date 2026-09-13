@@ -18,7 +18,7 @@ import {
   type ResourceFieldInfo,
 } from '../utils/php-parser.js';
 import { renderKey } from '../utils/ts-keys.js';
-import { mapDocTypeToTs, mapPhpTypeToTs } from '../utils/type-mapper.js';
+import { mapBaseCastToTs, mapDocTypeToTs } from '../utils/type-mapper.js';
 import { collectEnums } from './enums.js';
 
 /** The ferry virtual/type module id resources are delivered under. */
@@ -266,18 +266,7 @@ export function resolveCast(
     return { type: '', unresolved: true };
   }
 
-  // `decimal:<scale>` serializes to a formatted string, not a number.
-  if (low === 'decimal') return { type: 'string' };
-  if (['int', 'integer', 'real', 'float', 'double'].includes(low)) return { type: 'number' };
-  if (['bool', 'boolean'].includes(low)) return { type: 'boolean' };
-  if (['date', 'datetime', 'immutable_date', 'immutable_datetime', 'timestamp'].includes(low)) {
-    return { type: 'string' };
-  }
-  if (['array', 'json', 'collection'].includes(low)) return { type: 'any[]' };
-  if (low === 'object') return { type: 'Record<string, any>' };
-  if (['string', 'hashed', 'encrypted'].includes(low)) return { type: 'string' };
-
-  return { type: mapPhpTypeToTs(raw) };
+  return { type: mapBaseCastToTs(raw) };
 }
 
 // ---------------------------------------------------------------------------

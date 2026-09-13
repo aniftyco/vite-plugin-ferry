@@ -1,5 +1,33 @@
 import { describe, it, expect } from 'vitest';
-import { mapPhpTypeToTs, mapDocTypeToTs, parseTsObjectStringToPairs } from '../src/utils/type-mapper.js';
+import {
+  mapPhpTypeToTs,
+  mapDocTypeToTs,
+  mapBaseCastToTs,
+  parseTsObjectStringToPairs,
+} from '../src/utils/type-mapper.js';
+
+describe('mapBaseCastToTs', () => {
+  it('maps a parameterized cast by its base name, ignoring the :params tail', () => {
+    expect(mapBaseCastToTs('decimal:5')).toBe('string'); // formatted string, not number
+    expect(mapBaseCastToTs('decimal:2')).toBe('string');
+    expect(mapBaseCastToTs('datetime:Y-m-d')).toBe('string');
+    expect(mapBaseCastToTs('immutable_datetime:Y-m-d H:i:s')).toBe('string');
+    expect(mapBaseCastToTs('encrypted:array')).toBe('string');
+    expect(mapBaseCastToTs('encrypted:collection')).toBe('string');
+  });
+
+  it('maps bare base casts too', () => {
+    expect(mapBaseCastToTs('integer')).toBe('number');
+    expect(mapBaseCastToTs('boolean')).toBe('boolean');
+    expect(mapBaseCastToTs('array')).toBe('any[]');
+    expect(mapBaseCastToTs('object')).toBe('Record<string, any>');
+    expect(mapBaseCastToTs('encrypted')).toBe('string');
+  });
+
+  it('degrades an unknown base cast to any (never a raw token)', () => {
+    expect(mapBaseCastToTs('mystery:param')).toBe('any');
+  });
+});
 
 describe('mapPhpTypeToTs', () => {
   it('maps integer types to number', () => {

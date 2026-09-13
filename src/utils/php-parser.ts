@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type * as PhpParserTypes from 'php-parser';
 import { readFileSafe } from './file.js';
 import { renderKey } from './ts-keys.js';
-import { mapDocTypeToTs, mapPhpTypeToTs } from './type-mapper.js';
+import { mapBaseCastToTs, mapDocTypeToTs, mapPhpTypeToTs } from './type-mapper.js';
 
 // Import php-parser (CommonJS module with constructor)
 const require = createRequire(import.meta.url);
@@ -987,9 +987,17 @@ function resolveColumnField(prop: string, optional: boolean, options: ParseResou
               return { type: mapDocTypeToTs(shape), optional, column: prop };
             }
           }
-          const tsType =
-            trim.startsWith('{') || trim.includes(':') || /array\s*\{/.test(trim)
-              ? trim
+          // A genuine inline TS shape the user pinned via the cast (`{ value: X }`,
+          // `array{...}`, `Array<...>`) passes through verbatim. A Laravel parameterized cast
+          // (`decimal:5`, `datetime:Y-m-d`, `encrypted:array`) is a bare `word:params` token —
+          // it must be mapped by its BASE cast name, agreeing with the metadata path, never
+          // emitted verbatim (which would produce `quantity: decimal:5;` — invalid TS).
+          const isTsShape = trim.startsWith('{') || /^array\s*\{/.test(trim) || /^Array\s*</.test(trim);
+          const isParameterizedCast = /^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trim);
+          const tsType = isTsShape
+            ? trim
+            : isParameterizedCast
+              ? mapBaseCastToTs(trim)
               : mapCastToType(cast, enumsDir || '', collectedEnums);
           return { type: tsType, optional, column: prop };
         }

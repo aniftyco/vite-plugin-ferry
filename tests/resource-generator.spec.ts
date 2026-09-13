@@ -933,6 +933,94 @@ describe('@property array{...} shape refines an array cast (#21)', () => {
   });
 });
 
+describe('parameterized Laravel casts map by base name, never emit a raw token (#regression)', () => {
+  const inputs = collectResourceInputs({
+    resourcesDir: join(fixturesDir, 'Resources'),
+    modelsDir: join(fixturesDir, 'Models'),
+    enumsDir: join(fixturesDir, 'Enums'),
+    cwd: fixturesDir,
+  });
+
+  // The metadata a reachable DB would dump for InvoiceLineItem: parameterized casts on real
+  // columns. Lets us assert the DB path and the offline model-file path agree.
+  const withInvoiceMeta: MetadataDump = {
+    ...metadata,
+    InvoiceLineItem: {
+      table: 'invoice_line_items',
+      columns: [
+        { name: 'quantity', type_name: 'decimal', nullable: false, default: null },
+        { name: 'billed_on', type_name: 'datetime', nullable: false, default: null },
+        { name: 'secret_payload', type_name: 'text', nullable: false, default: null },
+      ],
+      casts: {
+        quantity: 'decimal:5',
+        billed_on: 'datetime:Y-m-d',
+        secret_payload: 'encrypted:array',
+      },
+      appends: [],
+      hidden: [],
+      visible: [],
+    },
+  };
+
+  function lineItemFields(metadataDump: MetadataDump): Record<string, { type: string; optional: boolean }> {
+    const { resources } = buildResources(inputs, metadataDump, false, new Set(['OrderStatus']));
+    const entry = resources.InvoiceLineItemResource;
+    expect(entry?.kind).toBe('shape');
+    return (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+  }
+
+  it('maps parameterized casts to their base type on the OFFLINE static-parse path (no metadata)', () => {
+    // The path that runs in Docker/CI with no reachable DB: model-file casts only.
+    const f = lineItemFields({});
+    expect(f.quantity).toEqual({ type: 'string', optional: false }); // decimal:5 -> string
+    expect(f.billed_on).toEqual({ type: 'string', optional: false }); // datetime:Y-m-d -> string
+    expect(f.secret_payload).toEqual({ type: 'string', optional: false }); // encrypted:array -> string
+
+    // The shipped bug emitted the raw cast token verbatim (`quantity: decimal:5;`). No field may
+    // carry a colon-bearing raw token.
+    for (const field of ['quantity', 'billed_on', 'secret_payload']) {
+      expect(f[field].type).not.toContain(':');
+    }
+  });
+
+  it('preserves a genuine inline TS object-shape cast untouched on the offline path', () => {
+    const f = lineItemFields({});
+    expect(f.meta).toEqual({ type: '{ label: string; score: number }', optional: false });
+  });
+
+  it('the DB-metadata path resolves parameterized casts to the same types (no divergence)', () => {
+    const offline = lineItemFields({});
+    const fromDb = lineItemFields(withInvoiceMeta);
+    for (const field of ['quantity', 'billed_on', 'secret_payload']) {
+      expect(fromDb[field]).toEqual(offline[field]);
+    }
+    // decimal:5 agrees at string across both paths, and matches resolveCast directly.
+    expect(fromDb.quantity.type).toBe('string');
+    expect(resolveCast('decimal:5')).toEqual({ type: 'string' });
+  });
+
+  it('emits a syntactically valid .d.ts block for a parameterized-cast resource (tsc --noEmit)', () => {
+    const { resources, enumNames } = buildResources(inputs, {}, false, new Set(['OrderStatus']));
+    const block = generateResourcesDtsBlock(resources, enumNames);
+    const ambient = assembleAmbientTypes({ blocks: [ENUM_BASE_DTS, block] });
+
+    const consumer = dedent`
+      import type { InvoiceLineItemResource } from '@ferry/resources';
+      const item: InvoiceLineItemResource = {
+        quantity: '10.00000',
+        billed_on: '2026-01-01',
+        secret_payload: 'ciphertext',
+        meta: { label: 'a', score: 1 },
+      };
+      void item;
+    `;
+
+    const { ok, output } = typecheck(ambient, consumer, false);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
 const circularOrderStatus: EnumDefinition = {
   name: 'OrderStatus',
   backing: 'string',

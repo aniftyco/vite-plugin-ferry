@@ -15,6 +15,31 @@ export function mapPhpTypeToTs(phpType: string): string {
 }
 
 /**
+ * Map a Laravel cast token to a TypeScript type by its BASE name, ignoring any `:params` tail
+ * (`decimal:5` → `decimal`, `datetime:Y-m-d` → `datetime`, `encrypted:array` → `encrypted`).
+ * This is the single source of truth both the metadata path (`resolveCast`) and the offline
+ * static-parse path share for built-in casts, so a parameterized cast resolves identically with
+ * or without a reachable database. Enum/class casts are handled by the callers, not here.
+ */
+export function mapBaseCastToTs(cast: string): string {
+  const base = cast.split(':')[0].trim();
+  const low = base.toLowerCase();
+
+  // `decimal:<scale>` serializes to a formatted string, not a number.
+  if (low === 'decimal') return 'string';
+  if (['int', 'integer', 'real', 'float', 'double'].includes(low)) return 'number';
+  if (['bool', 'boolean'].includes(low)) return 'boolean';
+  if (['date', 'datetime', 'immutable_date', 'immutable_datetime', 'timestamp'].includes(low)) {
+    return 'string';
+  }
+  if (['array', 'json', 'collection'].includes(low)) return 'any[]';
+  if (low === 'object') return 'Record<string, any>';
+  if (['string', 'hashed', 'encrypted'].includes(low)) return 'string';
+
+  return mapPhpTypeToTs(base);
+}
+
+/**
  * Map docblock types to TypeScript types.
  */
 export function mapDocTypeToTs(docType: string): string {
