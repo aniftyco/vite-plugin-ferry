@@ -40,6 +40,42 @@ export function mapBaseCastToTs(cast: string): string {
 }
 
 /**
+ * The built-in Laravel cast base names `mapBaseCastToTs` resolves to a concrete type. Mirrors
+ * the bases handled above so a caller can tell a built-in cast (`encrypted`, `object`, ...) apart
+ * from an enum/class cast (`OrderStatus`, `Foo::class`) that must resolve through enum lookup.
+ */
+const KNOWN_BASE_CASTS = new Set([
+  'decimal',
+  'int',
+  'integer',
+  'real',
+  'float',
+  'double',
+  'bool',
+  'boolean',
+  'date',
+  'datetime',
+  'immutable_date',
+  'immutable_datetime',
+  'timestamp',
+  'array',
+  'json',
+  'collection',
+  'object',
+  'string',
+  'hashed',
+  'encrypted',
+]);
+
+/**
+ * Whether a cast token names a built-in Laravel cast (ignoring any `:params` tail), i.e. one
+ * `mapBaseCastToTs` maps to a concrete type. Enum/class casts and inline TS shapes are not.
+ */
+export function isKnownBaseCast(cast: string): boolean {
+  return KNOWN_BASE_CASTS.has(cast.split(':')[0].trim().toLowerCase());
+}
+
+/**
  * Map docblock types to TypeScript types.
  */
 export function mapDocTypeToTs(docType: string): string {

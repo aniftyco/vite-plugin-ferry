@@ -23,7 +23,7 @@ import {
 } from '../src/generators/resources.js';
 import { generateRoutesDts, type RouteTable } from '../src/generators/routes.js';
 import type { EnumDefinition, ResourceFieldInfo } from '../src/utils/php-parser.js';
-import { extractFerryAnnotations } from '../src/utils/php-parser.js';
+import { extractFerryAnnotations, parseResourceFieldsAst } from '../src/utils/php-parser.js';
 import { dedent } from './utils.js';
 
 const fixturesDir = join(import.meta.dirname, 'fixtures');
@@ -1012,12 +1012,101 @@ describe('parameterized Laravel casts map by base name, never emit a raw token (
         billed_on: '2026-01-01',
         secret_payload: 'ciphertext',
         meta: { label: 'a', score: 1 },
+        secret_note: 'ciphertext',
+        password_digest: 'hashed',
+        settings_obj: { theme: 'dark' },
+        tag_list: ['a', 'b'],
+        synced_moment: '2026-01-01T00:00:00Z',
       };
       void item;
     `;
 
     const { ok, output } = typecheck(ambient, consumer, false);
     expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('bare parameter-less casts agree between the offline and DB paths', () => {
+  const inputs = collectResourceInputs({
+    resourcesDir: join(fixturesDir, 'Resources'),
+    modelsDir: join(fixturesDir, 'Models'),
+    enumsDir: join(fixturesDir, 'Enums'),
+    cwd: fixturesDir,
+  });
+
+  // The metadata a reachable DB would dump for InvoiceLineItem's bare (parameter-less) casts on
+  // real, non-nullable columns — so any divergence is the cast mapping alone, not nullability.
+  const withBareMeta: MetadataDump = {
+    ...metadata,
+    InvoiceLineItem: {
+      table: 'invoice_line_items',
+      columns: [
+        { name: 'secret_note', type_name: 'text', nullable: false, default: null },
+        { name: 'password_digest', type_name: 'text', nullable: false, default: null },
+        { name: 'settings_obj', type_name: 'json', nullable: false, default: null },
+        { name: 'tag_list', type_name: 'json', nullable: false, default: null },
+        { name: 'synced_moment', type_name: 'timestamp', nullable: false, default: null },
+      ],
+      casts: {
+        secret_note: 'encrypted',
+        password_digest: 'hashed',
+        settings_obj: 'object',
+        tag_list: 'collection',
+        synced_moment: 'timestamp',
+      },
+      appends: [],
+      hidden: [],
+      visible: [],
+    },
+  };
+
+  function lineItemFields(metadataDump: MetadataDump): Record<string, { type: string; optional: boolean }> {
+    const { resources } = buildResources(inputs, metadataDump, false, new Set(['OrderStatus']));
+    const entry = resources.InvoiceLineItemResource;
+    expect(entry?.kind).toBe('shape');
+    return (entry as Extract<ResourceEntry, { kind: 'shape' }>).fields;
+  }
+
+  const bareFields = ['secret_note', 'password_digest', 'settings_obj', 'tag_list', 'synced_moment'] as const;
+
+  const expected: Record<(typeof bareFields)[number], string> = {
+    secret_note: 'string',
+    password_digest: 'string',
+    settings_obj: 'Record<string, any>',
+    tag_list: 'any[]',
+    synced_moment: 'string',
+  };
+
+  it('resolves bare built-in casts to concrete types on the OFFLINE path (no metadata)', () => {
+    const f = lineItemFields({});
+    for (const field of bareFields) {
+      // Reverting the offline fix makes these degrade to `any`, failing this assertion.
+      expect(f[field]).toEqual({ type: expected[field], optional: false });
+    }
+  });
+
+  it('produces IDENTICAL types on the offline and DB-metadata paths', () => {
+    const offline = lineItemFields({});
+    const fromDb = lineItemFields(withBareMeta);
+    for (const field of bareFields) {
+      expect(fromDb[field]).toEqual(offline[field]);
+      expect(offline[field].type).toBe(expected[field]);
+    }
+  });
+
+  it('leaves enum/class casts and inline TS-shape casts unchanged on the offline path', () => {
+    const f = lineItemFields({});
+    // Inline TS-shape cast passes through verbatim.
+    expect(f.meta).toEqual({ type: '{ label: string; score: number }', optional: false });
+
+    // An enum/class cast still resolves through enum lookup (the enum name), not mapBaseCastToTs.
+    const orderContent = readFileSync(join(fixturesDir, 'Resources', 'OrderResource.php'), 'utf8');
+    const orderFields = parseResourceFieldsAst(orderContent, {
+      resourcesDir: join(fixturesDir, 'Resources'),
+      modelsDir: join(fixturesDir, 'Models'),
+      enumsDir: join(fixturesDir, 'Enums'),
+    });
+    expect(orderFields?.status.type).toBe('OrderStatus');
   });
 });
 
