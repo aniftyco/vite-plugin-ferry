@@ -7,6 +7,7 @@ Install ferry, add it to Vite, and let it generate types from your Laravel app. 
 - Laravel 13+
 - TypeScript `^5.0` (peer dependency, used for code generation)
 - npm. Ferry writes into the hoisted `node_modules/@types`, so it needs npm's flat `node_modules` layout. pnpm and Yarn PnP aren't supported.
+- PHP and a bootable Laravel app in the environment that builds the frontend. Ferry resolves routes and model metadata at build time by shelling out to `php artisan route:list` (routes) and `php artisan tinker` (model metadata), so a Node-only build environment (for example a Docker builder stage without PHP) can't resolve them — routes in particular fail the build loudly.
 
 ## Install
 

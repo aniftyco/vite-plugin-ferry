@@ -62,3 +62,7 @@ Only the patterns for routes actually referenced in your code ever reach the bro
 ## Frontend support
 
 `route()` and `route.is()` resolve through ferry on React, Vue, and Svelte, in dev and production.
+
+## PHP is required in the build environment
+
+Ferry resolves the route table at build time by running `php artisan route:list`, so PHP and a bootable Laravel app must be available wherever the frontend is built. A Node-only environment (for example a Docker builder stage that installs Node but not PHP) returns no routes, and any `route()` or `route.is()` usage then fails the build with a clear error rather than shipping a bundle that references an undefined `route`. Build the frontend where PHP and your Laravel app are present.
