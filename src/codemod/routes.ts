@@ -214,14 +214,26 @@ function rewrite(code: string, id: string, table: RouteTable, lang: OxcLang): { 
   let changed = false;
   let usedRoute = false;
 
+  // An empty table means `php artisan route:list` returned nothing (e.g. PHP unavailable in the
+  // build environment). Any `route()`/`route.is()` usage would then ship referencing an undefined
+  // `route`, so we fail the build loudly instead of degrading silently.
+  const tableEmpty = Object.keys(table).length === 0;
+
   const buildError = (node: Node, message: string): RouteCodemodError => {
     const { line, column } = locate(code, node.start);
     return new RouteCodemodError(`[routes] ${message}\n  at ${id.split('?')[0]}:${line}:${column}`);
   };
 
+  const emptyTableError = (node: Node): RouteCodemodError =>
+    buildError(
+      node,
+      "route() is used but no routes were loaded — 'php artisan route:list' returned nothing. PHP (and your Laravel app) must be available in the environment that builds the frontend."
+    );
+
   walk(parsed.program, (node) => {
     const routeCall = routeCallee(node);
     if (routeCall) {
+      if (tableEmpty) throw emptyTableError(node);
       const args = node.arguments ?? [];
       const nameArg = args[0];
       if (!nameArg) return;
@@ -261,6 +273,7 @@ function rewrite(code: string, id: string, table: RouteTable, lang: OxcLang): { 
 
     const is = isCallee(node);
     if (is) {
+      if (tableEmpty) throw emptyTableError(node);
       const args = node.arguments ?? [];
       const arg = args[0];
       if (!arg) return;

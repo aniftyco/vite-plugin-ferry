@@ -226,6 +226,28 @@ describe('transformRoutes', () => {
   });
 });
 
+describe('empty route table (routes could not be loaded)', () => {
+  const emptyTable: RouteTable = {};
+  const runEmpty = (code: string) => transformRoutes(code, '/project/src/app.tsx', emptyTable);
+
+  it('throws a build error when route() is used but no routes were loaded', () => {
+    expect(() => runEmpty(`route('users.show', { user: 1 });`)).toThrow(RouteCodemodError);
+    expect(() => runEmpty(`route('users.show', { user: 1 });`)).toThrow(
+      /route\(\) is used but no routes were loaded — 'php artisan route:list' returned nothing\. PHP \(and your Laravel app\) must be available in the environment that builds the frontend\./
+    );
+  });
+
+  it('throws a build error when route.is() is used but no routes were loaded', () => {
+    expect(() => runEmpty(`route.is('users.show');`)).toThrow(RouteCodemodError);
+  });
+
+  it('does not throw when a file has no route usage', () => {
+    expect(runEmpty(`const x = 1;`)).toBeNull();
+    // A substring 'route' that isn't a call must not trip the guard.
+    expect(runEmpty(`const reroute = 1;`)).toBeNull();
+  });
+});
+
 describe('no-leak guarantee (only referenced patterns ship)', () => {
   // A table whose routes have DISTINCT URI patterns so an unreferenced route's pattern is
   // identifiable by its absence — proving the full table never ships, only what is referenced.
