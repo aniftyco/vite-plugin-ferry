@@ -6,7 +6,7 @@ import { getPhpFilesRecursive, readFileSafe } from '../utils/file.js';
 import {
   declaresRules,
   DYNAMIC_KEY_SEGMENT,
-  extractExtendsShortName,
+  extractClassNames,
   extractFerryAnnotations,
   parseFormRequestRules,
   type EnumDefinition,
@@ -26,13 +26,8 @@ export type FormField = {
   optional: boolean;
 };
 
-/**
- * A form's final shape: a resolved field set, or a fallback record when `rules()` couldn't be
- * read, carrying the fields its `@ferry` pins type.
- */
-export type FormEntry =
-  | { kind: 'shape'; fields: Record<string, FormField> }
-  | { kind: 'fallback'; record: string; fields: Record<string, FormField> };
+/** A form's final shape: a resolved field set, or a fallback when `rules()` couldn't be read. */
+export type FormEntry = { kind: 'shape'; fields: Record<string, FormField> } | { kind: 'fallback'; record: string };
 
 /** A form request's static analysis result. */
 export type FormInput = {
@@ -231,8 +226,8 @@ function renderNode(node: TreeNode): string {
  * field set: rule keys drive the shape (nesting and wildcards expand to nested objects and
  * arrays), tokens drive each leaf type, and a field with no static type signal degrades to the
  * strict-mode fallback (`unknown`) or `any` with a warning. A form whose `rules()` couldn't be
- * analyzed at all falls back to `Record<string, any|unknown>`, intersected with the fields its
- * `@ferry` pins type. Never throws.
+ * analyzed at all is typed by its `@ferry` pins alone, or, with none, falls back to
+ * `Record<string, any|unknown>` with a warning. Never throws.
  */
 export function buildForms(
   inputs: FormInput[],
@@ -246,12 +241,17 @@ export function buildForms(
   const fallback = strict ? 'unknown' : 'any';
 
   for (const input of inputs) {
-    if (!input.rules) {
+    if (!input.rules && Object.keys(input.annotations).length > 0) {
       const fields: Record<string, FormField> = {};
       for (const [key, type] of Object.entries(input.annotations)) {
         fields[key] = { type: rewriteEnumPin(type, knownEnums), optional: false };
       }
-      forms[input.className] = { kind: 'fallback', record: fallback, fields };
+      forms[input.className] = { kind: 'shape', fields };
+      continue;
+    }
+
+    if (!input.rules) {
+      forms[input.className] = { kind: 'fallback', record: fallback };
       warnings.push(
         `${input.className}: could not statically analyze rules(); typed as \`Record<string, ${fallback}>\`.`
       );
@@ -308,18 +308,17 @@ function indentBlock(block: string): string {
 
 /** Render one form as an `export type` declaration. */
 function renderFormType(name: string, entry: FormEntry): string {
-  const fields = Object.entries(entry.fields);
-
-  if (entry.kind === 'fallback' && fields.length === 0) {
+  if (entry.kind === 'fallback') {
     return `export type ${name} = Record<string, ${entry.record}>;`;
   }
+
+  const fields = Object.entries(entry.fields);
   if (fields.length === 0) {
     return `export type ${name} = {};`;
   }
 
   const lines = fields.map(([key, field]) => `  ${renderKey(key)}${field.optional ? '?' : ''}: ${field.type};`);
-  const close = entry.kind === 'fallback' ? `} & Record<string, ${entry.record}>;` : `};`;
-  return [`export type ${name} = {`, ...lines, close].join('\n');
+  return [`export type ${name} = {`, ...lines, `};`].join('\n');
 }
 
 /**
@@ -345,7 +344,9 @@ export function generateFormsDtsBlock(
   const scanEnums = new Set([...enumNames, ...knownEnums]);
   const used = new Set<string>();
   for (const name of names) {
-    for (const field of Object.values(forms[name].fields)) {
+    const entry = forms[name];
+    if (entry.kind !== 'shape') continue;
+    for (const field of Object.values(entry.fields)) {
       for (const enumName of scanEnums) {
         if (typeContainsName(field.type, `${enumName}Value`)) used.add(`${enumName}Value`);
       }
@@ -372,8 +373,8 @@ export function generateFormsDtsBlock(
  * `php-parser` static pass — no PHP process. Recurses into subdirectories. Forms are keyed by
  * their short class name; a duplicate short name warns (first wins) or, under `strict`,
  * hard-fails. A request that declares no `rules()` takes its parent's, following `extends`
- * through the request files by short class name, along with the parent's `@ferry` pins (its
- * own pins win). A missing requests directory yields no forms.
+ * (resolved through the file's namespace and `use` imports) through the request files, along
+ * with the parent's `@ferry` pins (its own pins win). A missing requests directory yields no forms.
  */
 export function collectFormInputs(options: { requestsDir: string; cwd: string; strict?: boolean }): FormInput[] {
   const { requestsDir, cwd, strict = false } = options;
@@ -382,9 +383,17 @@ export function collectFormInputs(options: { requestsDir: string; cwd: string; s
     return [];
   }
 
+  const contents = new Map<string, string>();
+  const pathsByClass = new Map<string, string>();
   const files = new Map<string, string>();
 
   for (const filePath of getPhpFilesRecursive(requestsDir)) {
+    const content = readFileSafe(filePath) || '';
+    contents.set(filePath, content);
+
+    const fqcn = extractClassNames(content)?.name.toLowerCase();
+    if (fqcn !== undefined && !pathsByClass.has(fqcn)) pathsByClass.set(fqcn, filePath);
+
     const className = parse(filePath).name;
     const relativePhpPath = relative(cwd, filePath);
 
@@ -404,17 +413,17 @@ export function collectFormInputs(options: { requestsDir: string; cwd: string; s
 
   for (const [className, filePath] of files) {
     try {
-      let content = readFileSafe(filePath) || '';
+      let content = contents.get(filePath) ?? '';
       let annotations = extractFerryAnnotations(content);
-      const visited = new Set([className]);
+      const visited = new Set([filePath]);
 
       while (!declaresRules(content)) {
-        const parent = extractExtendsShortName(content);
-        const parentPath = parent === null || visited.has(parent) ? undefined : files.get(parent);
-        if (parentPath === undefined) break;
+        const parent = extractClassNames(content)?.parent;
+        const parentPath = parent ? pathsByClass.get(parent.toLowerCase()) : undefined;
+        if (parentPath === undefined || visited.has(parentPath)) break;
 
-        visited.add(parent);
-        content = readFileSafe(parentPath) || '';
+        visited.add(parentPath);
+        content = contents.get(parentPath) ?? '';
         annotations = { ...extractFerryAnnotations(content), ...annotations };
       }
 

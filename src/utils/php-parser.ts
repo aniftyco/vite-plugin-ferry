@@ -891,6 +891,52 @@ export function resourceMergesParent(phpContent: string): boolean {
 }
 
 /**
+ * The fully qualified name of a file's first class and of the class it extends (`null` when it
+ * extends none), with the parent resolved the way PHP resolves it: a leading `\\` is already
+ * fully qualified, a first segment matching a `use` import (or its alias) expands to that import,
+ * and anything else is relative to the file's namespace. `null` when the file has no class.
+ */
+export function extractClassNames(phpContent: string): { name: string; parent: string | null } | null {
+  const ast = parsePhp(phpContent);
+  if (!ast) return null;
+
+  const classNode = findNodeByKind(ast, 'class') as PhpParserTypes.Class | null;
+  if (!classNode) return null;
+
+  const namespaceNode = findNodeByKind(ast, 'namespace') as PhpParserTypes.Namespace | null;
+  const namespace = namespaceNode?.name ? namespaceNode.name.replace(/^\\+/, '') : '';
+  const qualify = (name: string) => (namespace ? `${namespace}\\${name}` : name);
+
+  const imports = new Map<string, string>();
+  for (const group of findAllNodesByKind(ast, 'usegroup') as PhpParserTypes.UseGroup[]) {
+    if (group.type) continue;
+    const prefix = group.name ? `${group.name.replace(/^\\+/, '')}\\` : '';
+    // php-parser's typings name this field `item`; the parser sets `items`.
+    for (const item of (group as unknown as { items: PhpParserTypes.UseItem[] }).items) {
+      const full = `${prefix}${item.name.replace(/^\\+/, '')}`;
+      const alias = item.alias?.name ?? full.split('\\').pop() ?? full;
+      imports.set(alias.toLowerCase(), full);
+    }
+  }
+
+  const className = typeof classNode.name === 'string' ? classNode.name : classNode.name.name;
+  const parentNode = classNode.extends;
+  if (!parentNode || parentNode.kind !== 'name') return { name: qualify(className), parent: null };
+
+  const parentName = parentNode as PhpParserTypes.Name;
+  let parent: string;
+  if (parentName.resolution === 'fqn' || parentName.name.startsWith('\\')) {
+    parent = parentName.name.replace(/^\\+/, '');
+  } else {
+    const [first, ...rest] = parentName.name.split('\\');
+    const imported = imports.get(first.toLowerCase());
+    parent = imported ? [imported, ...rest].join('\\') : qualify(parentName.name);
+  }
+
+  return { name: qualify(className), parent };
+}
+
+/**
  * The short class name of a resource's `extends` parent (`AdminSessionResource extends
  * SessionResource` → `SessionResource`), namespace stripped. `null` when the class has no parent
  * or can't be parsed. Lets the resource merge decide whether an

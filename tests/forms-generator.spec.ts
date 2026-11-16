@@ -333,11 +333,11 @@ describe('buildForms — rule → type mapping', () => {
 
   it('falls a form whose rules() cannot be analyzed back to a Record type with a warning', () => {
     const { forms, warnings } = buildForms([{ className: 'WeirdRequest', rules: null, annotations: {} }], false);
-    expect(forms.WeirdRequest).toEqual({ kind: 'fallback', record: 'any', fields: {} });
+    expect(forms.WeirdRequest).toEqual({ kind: 'fallback', record: 'any' });
     expect(warnings[0]).toContain('WeirdRequest');
   });
 
-  it('keeps the @ferry pins of a form whose rules() cannot be analyzed', () => {
+  it('types a form whose rules() cannot be analyzed by its @ferry pins alone, without a warning', () => {
     const { forms, warnings } = buildForms(
       [{ className: 'WeirdRequest', rules: null, annotations: { priority: 'Priority', count: 'number' } }],
       true,
@@ -345,15 +345,11 @@ describe('buildForms — rule → type mapping', () => {
       knownEnums
     );
 
-    expect(forms.WeirdRequest).toEqual({
-      kind: 'fallback',
-      record: 'unknown',
-      fields: {
-        priority: { type: 'PriorityValue', optional: false },
-        count: { type: 'number', optional: false },
-      },
+    expect(fieldsOf(forms, 'WeirdRequest')).toEqual({
+      priority: { type: 'PriorityValue', optional: false },
+      count: { type: 'number', optional: false },
     });
-    expect(warnings[0]).toContain('WeirdRequest');
+    expect(warnings).toEqual([]);
   });
 });
 
@@ -377,6 +373,18 @@ describe('collectFormInputs', () => {
     // ForceDeletePostRequest -> DeletePostRequest -> SecureDeleteRequest: the chain is followed.
     expect(fieldsOf(forms, 'ForceDeletePostRequest')).toEqual(fieldsOf(forms, 'DeletePostRequest'));
     expect(warnings.some((w) => w.includes('DeletePostRequest'))).toBe(false);
+  });
+
+  it('resolves the parent through use imports and the namespace when short names collide', () => {
+    const inputs = collectFormInputs({ requestsDir: join(fixturesDir, 'RequestsNamespaced'), cwd: fixturesDir });
+    const { forms } = buildForms(inputs, false);
+
+    // Admin\DeleteAccountRequest extends BaseRequest from its own namespace, not Billing's.
+    expect(fieldsOf(forms, 'DeleteAccountRequest')).toEqual({ password: { type: 'string', optional: false } });
+    // Billing\CancelPlanRequest imports Admin\BaseRequest under an alias over its own Billing\BaseRequest.
+    expect(fieldsOf(forms, 'CancelPlanRequest')).toEqual({ password: { type: 'string', optional: false } });
+    // Billing\RefundRequest extends its own namespace's BaseRequest.
+    expect(fieldsOf(forms, 'RefundRequest')).toEqual({ amount: { type: 'number', optional: false } });
   });
 
   it('falls back when no request in the extends chain declares rules()', () => {
@@ -438,21 +446,6 @@ describe('generateFormsDtsBlock', () => {
 
     const block = generateFormsDtsBlock(forms, new Set(), new Set(['Priority']));
     expect(block).toContain(`import { PriorityValue } from '@ferry/enums';`);
-  });
-
-  it('renders a pinned fallback form as its pins intersected with the fallback record', () => {
-    const forms: Record<string, FormEntry> = {
-      WeirdRequest: { kind: 'fallback', record: 'any', fields: { count: { type: 'number', optional: false } } },
-      OpaqueRequest: { kind: 'fallback', record: 'unknown', fields: {} },
-    };
-
-    const block = generateFormsDtsBlock(forms);
-    expect(block).toContain(dedent`
-      export type WeirdRequest = {
-          count: number;
-        } & Record<string, any>;
-    `);
-    expect(block).toContain('export type OpaqueRequest = Record<string, unknown>;');
   });
 
   it('emits an empty declare module block when there are no forms', () => {
@@ -668,7 +661,7 @@ describe('a bare enum-name form pin resolves to its value union end-to-end (tsc 
   });
 });
 
-describe('dynamic-key and pinned fallback forms type-check (tsc --noEmit)', () => {
+describe('dynamic-key and pin-only forms type-check (tsc --noEmit)', () => {
   const { forms: built } = build();
   const forms: Record<string, FormEntry> = {
     UpdateLimitsRequest: built.UpdateLimitsRequest,
@@ -690,7 +683,10 @@ describe('dynamic-key and pinned fallback forms type-check (tsc --noEmit)', () =
       // @ts-expect-error an override is number | null, not string
       limits.overrides.apps = 'three';
 
-      const weird: WeirdRequest = { count: 1, anything: 'else' };
+      const weird: WeirdRequest = { count: 1 };
+
+      // @ts-expect-error a pin-only form has only its pinned fields
+      const extra: WeirdRequest = { count: 1, anything: 'else' };
 
       // @ts-expect-error the count pin is number, not string
       weird.count = 'one';

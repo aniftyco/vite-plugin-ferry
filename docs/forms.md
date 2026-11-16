@@ -2,7 +2,7 @@
 
 `@ferry/forms` types your `FormRequest` classes. Ferry reads each `rules()` method and generates a data-shape type per request, named by the class's verbatim short name.
 
-A request that declares no `rules()` of its own takes its parent's, following `extends` through your request classes until one declares it. The parent's `@ferry` pins come with its rules, and a pin on the child overrides the parent's pin for the same field.
+A request that declares no `rules()` of its own takes its parent's, following `extends` through your request classes until one declares it. The parent is resolved the way PHP resolves it, through the class's `use` imports (aliases included) or its own namespace, so two requests that share a short name in different namespaces never get mixed up. The parent's `@ferry` pins come with its rules, and a pin on the child overrides the parent's pin for the same field.
 
 ## How `rules()` is read
 
@@ -88,6 +88,6 @@ Dotted keys nest (`profile.bio` becomes `profile: { bio: ... }`) and a `*` segme
 
 A field whose only rule ferry can't map to a type (an unrecognized `Rule::` object, a closure, or a rule with no type signal) degrades to `any`, or `unknown` under [`strict`](configuration.md), with a warning. The same `@ferry <field> <type>` docblock [pin](ferry-pins.md) available on `toArray()` and `share()` works here: a tag in the `FormRequest`'s docblock overrides that field's generated type verbatim and clears its degrade warning.
 
-A request whose `rules()` ferry can't read types as `Record<string, any>` (`unknown` under `strict`), with a warning. Its `@ferry` pins still apply: the pinned fields are intersected with that record, as `{ count: number } & Record<string, any>`.
+When ferry can't read a request's `rules()`, `@ferry` pins on the request type it on their own: the generated type holds exactly the pinned fields, and no warning is shown. With no pins, the request types as `Record<string, any>` (`unknown` under `strict`), with a warning.
 
 A form with no matching `FormRequest` generates no type, and its `useForm()` call simply omits the generic.
