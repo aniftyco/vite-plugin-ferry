@@ -5,14 +5,14 @@ Install ferry, add it to Vite, and let it generate types from your Laravel app. 
 ## Requirements
 
 - Laravel 13+
-- TypeScript `^5.0` (peer dependency, used for code generation)
+- TypeScript 5.0 or newer, to type-check against the generated types
 - npm. Ferry writes into the hoisted `node_modules/@types`, so it needs npm's flat `node_modules` layout. pnpm and Yarn PnP aren't supported.
 - PHP and a bootable Laravel app in the environment that builds the frontend. Ferry resolves routes and model metadata at build time by shelling out to `php artisan route:list` (routes) and `php artisan tinker` (model metadata), so a Node-only build environment (for example a Docker builder stage without PHP) can't resolve them — routes in particular fail the build loudly.
 
 ## Install
 
 ```bash
-npm install vite-plugin-ferry typescript@^5 --save-dev
+npm install vite-plugin-ferry typescript --save-dev
 ```
 
 Add it to your `vite.config.ts`:
@@ -26,9 +26,9 @@ export default defineConfig({
 });
 ```
 
-No tsconfig changes, no generated files to gitignore. Ferry auto-loads its types from `node_modules/@types/vite-plugin-ferry` the moment TypeScript 5.x sees the package installed.
+No generated files to gitignore. Ferry writes its types to `node_modules/@types/vite-plugin-ferry`. TypeScript 5 loads them automatically, as it does every `@types/*` package, unless your `tsconfig.json` sets `compilerOptions.types`.
 
-If your `tsconfig.json` sets `compilerOptions.types` (which suppresses TypeScript's automatic `@types/*` inclusion), add the bare package name to the array so ferry's ambient types still load:
+TypeScript 6 and newer load no `@types/*` package that `compilerOptions.types` doesn't name. On those versions, and on TypeScript 5 when you set `types` yourself, add the bare package name to the array so ferry's ambient types load:
 
 ```json
 {

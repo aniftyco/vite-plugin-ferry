@@ -63,7 +63,7 @@ function registerDefaults(virtual: VirtualModuleRegistry, dts: DtsRegistry): voi
 
 /**
  * Construct the delivery layer for a project rooted at `cwd`. Ambient types are
- * written to `node_modules/@types/vite-plugin-ferry`, which TypeScript 5.x auto-loads.
+ * written to `node_modules/@types/vite-plugin-ferry`.
  */
 export function createDelivery(cwd: string): Delivery {
   const virtual = new VirtualModuleRegistry();

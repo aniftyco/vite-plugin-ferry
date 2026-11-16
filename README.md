@@ -11,7 +11,7 @@ Ferry reads your Laravel app and generates TypeScript for the surface your Inert
 ## Install
 
 ```bash
-npm install vite-plugin-ferry typescript@^5 --save-dev
+npm install vite-plugin-ferry typescript --save-dev
 ```
 
 ## Quick start
@@ -27,7 +27,7 @@ export default defineConfig({
 });
 ```
 
-That's it. No tsconfig changes, no generated files to gitignore. See [Getting started](docs/getting-started.md) for how generation runs and how the types load.
+That's it. No generated files to gitignore. On TypeScript 6 and newer, add `"vite-plugin-ferry"` to `compilerOptions.types` in `tsconfig.json` so the generated types load. See [Getting started](docs/getting-started.md) for how generation runs and how the types load.
 
 Ferry generates six virtual modules you import from directly:
 
