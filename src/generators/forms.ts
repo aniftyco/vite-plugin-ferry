@@ -3,7 +3,14 @@ import { join, parse, relative } from 'node:path';
 import type { Delivery } from '../delivery/index.js';
 import { logWarn } from '../utils/banner.js';
 import { getPhpFilesRecursive, readFileSafe } from '../utils/file.js';
-import { extractFerryAnnotations, parseFormRequestRules, type EnumDefinition } from '../utils/php-parser.js';
+import {
+  declaresRules,
+  DYNAMIC_KEY_SEGMENT,
+  extractExtendsShortName,
+  extractFerryAnnotations,
+  parseFormRequestRules,
+  type EnumDefinition,
+} from '../utils/php-parser.js';
 import { renderKey } from '../utils/ts-keys.js';
 import { collectEnums, ENUMS_MODULE_ID } from './enums.js';
 
@@ -19,13 +26,21 @@ export type FormField = {
   optional: boolean;
 };
 
-/** A form's final shape: a resolved field set, or a fallback when `rules()` couldn't be read. */
-export type FormEntry = { kind: 'shape'; fields: Record<string, FormField> } | { kind: 'fallback'; record: string };
+/**
+ * A form's final shape: a resolved field set, or a fallback record when `rules()` couldn't be
+ * read, carrying the fields its `@ferry` pins type.
+ */
+export type FormEntry =
+  | { kind: 'shape'; fields: Record<string, FormField> }
+  | { kind: 'fallback'; record: string; fields: Record<string, FormField> };
 
 /** A form request's static analysis result. */
 export type FormInput = {
   className: string;
-  /** The `rules()` map (key → tokens), or null when it couldn't be analyzed at all. */
+  /**
+   * The `rules()` map (key → tokens), read from the nearest class in the request's `extends`
+   * chain that declares `rules()`, or null when it couldn't be analyzed at all.
+   */
   rules: Record<string, string[]> | null;
   /** `@ferry <field> <type>` docblock pins: field → raw TS type, emitted verbatim. */
   annotations: Record<string, string>;
@@ -90,7 +105,9 @@ function resolveTokens(
   for (const token of tokens) {
     const name = token.split(':')[0].trim().toLowerCase();
 
-    if (['string', 'email', 'url', 'uuid', 'date'].includes(name)) return { type: 'string', optional, nullable };
+    if (['string', 'email', 'url', 'uuid', 'date', 'ip', 'ipv4', 'ipv6', 'mac_address'].includes(name)) {
+      return { type: 'string', optional, nullable };
+    }
     if (['integer', 'numeric', 'decimal'].includes(name)) return { type: 'number', optional, nullable };
     if (['boolean', 'bool'].includes(name)) return { type: 'boolean', optional, nullable };
     if (name === 'accepted') return { type: 'boolean', optional, nullable };
@@ -148,7 +165,7 @@ function newNode(): TreeNode {
 /**
  * Build a nested tree from dotted/wildcard rule keys. `profile.bio` nests `bio` under
  * `profile`; a `*` segment marks its parent as an array (`items.*.id` → `items` is an array of
- * `{ id }`). A key that also has children (an `array` rule alongside `items.*.id`) keeps its
+ * `{ id }`); a `DYNAMIC_KEY_SEGMENT` marks it as a record keyed by runtime strings. A key that also has children (an `array` rule alongside `items.*.id`) keeps its
  * modifiers on the node but renders from the children.
  */
 function buildTree(fields: ResolvedField[]): TreeNode {
@@ -178,7 +195,8 @@ function nodeOptional(node: TreeNode): boolean {
 
 /**
  * Render a tree node to a TypeScript type. A node with children renders as an array (when a
- * `*` child is present) or an object literal; a leaf renders its resolved type. A node's own
+ * `*` child is present) or an object literal, intersected with `Record<string, T>` when a
+ * dynamic-key child is present; a leaf renders its resolved type. A node's own
  * `nullable` modifier unions `| null` onto whichever shape it produces.
  */
 function renderNode(node: TreeNode): string {
@@ -189,10 +207,13 @@ function renderNode(node: TreeNode): string {
     if (star) {
       base = `${renderNode(star)}[]`;
     } else {
-      const props = [...node.children.entries()].map(
-        ([segment, child]) => `${renderKey(segment)}${nodeOptional(child) ? '?' : ''}: ${renderNode(child)}`
-      );
-      base = `{ ${props.join('; ')} }`;
+      const dynamic = node.children.get(DYNAMIC_KEY_SEGMENT);
+      const props = [...node.children.entries()]
+        .filter(([segment]) => segment !== DYNAMIC_KEY_SEGMENT)
+        .map(([segment, child]) => `${renderKey(segment)}${nodeOptional(child) ? '?' : ''}: ${renderNode(child)}`);
+      const shapes = props.length > 0 ? [`{ ${props.join('; ')} }`] : [];
+      if (dynamic) shapes.push(`Record<string, ${renderNode(dynamic)}>`);
+      base = shapes.join(' & ');
     }
   } else {
     base = node.leaf?.type ?? 'any';
@@ -210,7 +231,8 @@ function renderNode(node: TreeNode): string {
  * field set: rule keys drive the shape (nesting and wildcards expand to nested objects and
  * arrays), tokens drive each leaf type, and a field with no static type signal degrades to the
  * strict-mode fallback (`unknown`) or `any` with a warning. A form whose `rules()` couldn't be
- * analyzed at all falls back to `Record<string, any|unknown>`. Never throws.
+ * analyzed at all falls back to `Record<string, any|unknown>`, intersected with the fields its
+ * `@ferry` pins type. Never throws.
  */
 export function buildForms(
   inputs: FormInput[],
@@ -225,7 +247,11 @@ export function buildForms(
 
   for (const input of inputs) {
     if (!input.rules) {
-      forms[input.className] = { kind: 'fallback', record: fallback };
+      const fields: Record<string, FormField> = {};
+      for (const [key, type] of Object.entries(input.annotations)) {
+        fields[key] = { type: rewriteEnumPin(type, knownEnums), optional: false };
+      }
+      forms[input.className] = { kind: 'fallback', record: fallback, fields };
       warnings.push(
         `${input.className}: could not statically analyze rules(); typed as \`Record<string, ${fallback}>\`.`
       );
@@ -282,17 +308,18 @@ function indentBlock(block: string): string {
 
 /** Render one form as an `export type` declaration. */
 function renderFormType(name: string, entry: FormEntry): string {
-  if (entry.kind === 'fallback') {
+  const fields = Object.entries(entry.fields);
+
+  if (entry.kind === 'fallback' && fields.length === 0) {
     return `export type ${name} = Record<string, ${entry.record}>;`;
   }
-
-  const fields = Object.entries(entry.fields);
   if (fields.length === 0) {
     return `export type ${name} = {};`;
   }
 
   const lines = fields.map(([key, field]) => `  ${renderKey(key)}${field.optional ? '?' : ''}: ${field.type};`);
-  return [`export type ${name} = {`, ...lines, `};`].join('\n');
+  const close = entry.kind === 'fallback' ? `} & Record<string, ${entry.record}>;` : `};`;
+  return [`export type ${name} = {`, ...lines, close].join('\n');
 }
 
 /**
@@ -318,9 +345,7 @@ export function generateFormsDtsBlock(
   const scanEnums = new Set([...enumNames, ...knownEnums]);
   const used = new Set<string>();
   for (const name of names) {
-    const entry = forms[name];
-    if (entry.kind !== 'shape') continue;
-    for (const field of Object.values(entry.fields)) {
+    for (const field of Object.values(forms[name].fields)) {
       for (const enumName of scanEnums) {
         if (typeContainsName(field.type, `${enumName}Value`)) used.add(`${enumName}Value`);
       }
@@ -346,7 +371,9 @@ export function generateFormsDtsBlock(
  * Read every form-request file and statically analyze its `rules()`. Pure file I/O plus the
  * `php-parser` static pass — no PHP process. Recurses into subdirectories. Forms are keyed by
  * their short class name; a duplicate short name warns (first wins) or, under `strict`,
- * hard-fails. A missing requests directory yields no forms.
+ * hard-fails. A request that declares no `rules()` takes its parent's, following `extends`
+ * through the request files by short class name, along with the parent's `@ferry` pins (its
+ * own pins win). A missing requests directory yields no forms.
  */
 export function collectFormInputs(options: { requestsDir: string; cwd: string; strict?: boolean }): FormInput[] {
   const { requestsDir, cwd, strict = false } = options;
@@ -355,14 +382,13 @@ export function collectFormInputs(options: { requestsDir: string; cwd: string; s
     return [];
   }
 
-  const inputs: FormInput[] = [];
-  const seen = new Map<string, string>();
+  const files = new Map<string, string>();
 
   for (const filePath of getPhpFilesRecursive(requestsDir)) {
     const className = parse(filePath).name;
     const relativePhpPath = relative(cwd, filePath);
 
-    const firstPath = seen.get(className);
+    const firstPath = files.get(className);
     if (firstPath !== undefined) {
       const message = `Duplicate form request class name '${className}': ${relative(cwd, firstPath)} and ${relativePhpPath}`;
       if (strict) {
@@ -371,17 +397,30 @@ export function collectFormInputs(options: { requestsDir: string; cwd: string; s
       logWarn('forms', `${message}. Keeping the first; ignoring ${relativePhpPath}.`);
       continue;
     }
-    seen.set(className, filePath);
+    files.set(className, filePath);
+  }
 
+  const inputs: FormInput[] = [];
+
+  for (const [className, filePath] of files) {
     try {
-      const content = readFileSafe(filePath) || '';
-      inputs.push({
-        className,
-        rules: parseFormRequestRules(content),
-        annotations: extractFerryAnnotations(content),
-      });
+      let content = readFileSafe(filePath) || '';
+      let annotations = extractFerryAnnotations(content);
+      const visited = new Set([className]);
+
+      while (!declaresRules(content)) {
+        const parent = extractExtendsShortName(content);
+        const parentPath = parent === null || visited.has(parent) ? undefined : files.get(parent);
+        if (parentPath === undefined) break;
+
+        visited.add(parent);
+        content = readFileSafe(parentPath) || '';
+        annotations = { ...extractFerryAnnotations(content), ...annotations };
+      }
+
+      inputs.push({ className, rules: parseFormRequestRules(content), annotations });
     } catch (e) {
-      logWarn('forms', `Failed to parse form request file: ${relativePhpPath} (${e})`);
+      logWarn('forms', `Failed to parse form request file: ${relative(cwd, filePath)} (${e})`);
     }
   }
 

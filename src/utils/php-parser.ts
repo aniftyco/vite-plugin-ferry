@@ -1426,17 +1426,13 @@ export function parseResourceFieldsAst(
 }
 
 /**
- * Parse a `FormRequest`'s `rules()` method into a map of field key → rule tokens. Finds the
- * class, then its `rules` method, and reads the array literal it returns. Each entry's key is
- * the field's (possibly dotted/wildcard) path; its value is either a pipe-string (`'required|
- * string'` → `['required', 'string']`) or an array whose STRING items are tokens. Non-string
- * items (`Rule::unique(...)`, closures, etc.) carry no static type signal and are dropped, so a
- * field whose only rule is such an item resolves to an empty token list — the caller degrades it.
- *
- * Returns null when the class or a `rules()` method returning an array literal can't be found,
- * so the caller falls the whole form back to a loose record rather than emitting a broken type.
+ * The key segment a rule key built from an interpolated variable (`"overrides.$key"`) carries in
+ * place of the segment whose value is only known at runtime.
  */
-export function parseFormRequestRules(phpContent: string): Record<string, string[]> | null {
+export const DYNAMIC_KEY_SEGMENT = '{key}';
+
+/** The `rules` method of the first class in a PHP file, or null when it declares none. */
+function findRulesMethod(phpContent: string): PhpParserTypes.Method | null {
   const ast = parsePhp(phpContent);
   if (!ast) return null;
 
@@ -1444,19 +1440,52 @@ export function parseFormRequestRules(phpContent: string): Record<string, string
   if (!classNode) return null;
 
   const methods = findAllNodesByKind(classNode, 'method') as PhpParserTypes.Method[];
-  const rulesMethod = methods.find((m) => {
-    const methodName = typeof m.name === 'string' ? m.name : (m.name as PhpParserTypes.Identifier).name;
-    return methodName === 'rules';
-  });
+  return (
+    methods.find((m) => {
+      const methodName = typeof m.name === 'string' ? m.name : (m.name as PhpParserTypes.Identifier).name;
+      return methodName === 'rules';
+    }) ?? null
+  );
+}
+
+/** Whether a `FormRequest` file declares its own `rules()` method, rather than inheriting one. */
+export function declaresRules(phpContent: string): boolean {
+  return findRulesMethod(phpContent) !== null;
+}
+
+/**
+ * Parse a `FormRequest`'s `rules()` method into a map of field key → rule tokens. Finds the
+ * class, then its `rules` method, and reads the array it returns: an array literal, or a variable
+ * followed back to the array literal assigned to it and the keys assigned onto it afterwards (see
+ * `rulesFromVariable`). Each entry's key is the field's (possibly dotted/wildcard) path; its value
+ * is either a pipe-string (`'required|string'` → `['required', 'string']`) or an array whose
+ * STRING items are tokens. Non-string items (`Rule::unique(...)`, closures, etc.) carry no static
+ * type signal and are dropped, so a field whose only rule is such an item resolves to an empty
+ * token list — the caller degrades it.
+ *
+ * Returns null when the class or a `rules()` method returning such an array can't be found,
+ * so the caller falls the whole form back to a loose record rather than emitting a broken type.
+ */
+export function parseFormRequestRules(phpContent: string): Record<string, string[]> | null {
+  const rulesMethod = findRulesMethod(phpContent);
   if (!rulesMethod || !rulesMethod.body) return null;
 
   const returnNode = findNodeByKind(rulesMethod.body, 'return') as PhpParserTypes.Return | null;
   const expr = returnNode?.expr;
-  if (!expr || expr.kind !== 'array') return null;
+  if (expr?.kind === 'array') return arrayRules(expr as PhpParserTypes.Array);
+  if (expr?.kind === 'variable') {
+    const name = (expr as PhpParserTypes.Variable).name;
+    return typeof name === 'string' ? rulesFromVariable(rulesMethod.body, name) : null;
+  }
 
+  return null;
+}
+
+/** The rule map of a `[key => rule, ...]` array literal; entries without a string key are skipped. */
+function arrayRules(array: PhpParserTypes.Array): Record<string, string[]> {
   const rules: Record<string, string[]> = {};
 
-  for (const item of (expr as PhpParserTypes.Array).items) {
+  for (const item of array.items) {
     if (item.kind !== 'entry') continue;
     const entry = item as PhpParserTypes.Entry;
     const key = entry.key ? getStringValue(entry.key) : null;
@@ -1466,6 +1495,97 @@ export function parseFormRequestRules(phpContent: string): Record<string, string
   }
 
   return rules;
+}
+
+/**
+ * The rule map `rules()` builds in `$name` before returning it: the array literal first assigned
+ * to the variable, then every `$name[<key>] = <rule>` after it, in source order, including those
+ * inside loops and conditionals. A double-quoted key with an interpolated variable
+ * (`"overrides.$key"`) puts `DYNAMIC_KEY_SEGMENT` in place of each segment that interpolates.
+ *
+ * Returns null when the variable is built any other way — its first assignment isn't an array
+ * literal, it's reassigned, appended to, compound-assigned, or keyed by an expression that isn't
+ * a string — since the rules it ends up holding can't be read statically.
+ */
+function rulesFromVariable(body: PhpParserTypes.Block, name: string): Record<string, string[]> | null {
+  const assignments: PhpParserTypes.Assign[] = [];
+  collectStatementAssignments(body, assignments);
+
+  let rules: Record<string, string[]> | null = null;
+
+  for (const assign of assignments) {
+    const left = assign.left;
+
+    if (left.kind === 'variable') {
+      if ((left as PhpParserTypes.Variable).name !== name) continue;
+      if (rules !== null || assign.operator !== '=' || assign.right.kind !== 'array') return null;
+      rules = arrayRules(assign.right as PhpParserTypes.Array);
+      continue;
+    }
+
+    if (left.kind !== 'offsetlookup') continue;
+    const lookup = left as PhpParserTypes.OffsetLookup;
+    if (lookup.what.kind !== 'variable' || (lookup.what as PhpParserTypes.Variable).name !== name) continue;
+    if (rules === null || assign.operator !== '=' || !lookup.offset) return null;
+
+    const key = ruleKey(lookup.offset);
+    if (key === null) return null;
+    rules[key] = ruleTokens(assign.right);
+  }
+
+  return rules;
+}
+
+/**
+ * Collect the assignments made as statements of a method body, in source order, descending into
+ * blocks, loops, and conditionals but never into closures or other expressions.
+ */
+function collectStatementAssignments(node: PhpParserTypes.Node, out: PhpParserTypes.Assign[]): void {
+  switch (node.kind) {
+    case 'expressionstatement': {
+      const expression = (node as PhpParserTypes.ExpressionStatement).expression;
+      if (expression.kind === 'assign') out.push(expression as PhpParserTypes.Assign);
+      return;
+    }
+    case 'block':
+      for (const child of (node as PhpParserTypes.Block).children) collectStatementAssignments(child, out);
+      return;
+    case 'foreach':
+    case 'for':
+    case 'while':
+    case 'do': {
+      const loopBody = (node as PhpParserTypes.Foreach).body;
+      if (loopBody) collectStatementAssignments(loopBody, out);
+      return;
+    }
+    case 'if': {
+      const branch = node as PhpParserTypes.If;
+      if (branch.body) collectStatementAssignments(branch.body, out);
+      if (branch.alternate) collectStatementAssignments(branch.alternate, out);
+      return;
+    }
+  }
+}
+
+/**
+ * The rule key an offset names: a plain string as-is, or a double-quoted string whose
+ * interpolated segments become `DYNAMIC_KEY_SEGMENT`. Null for any other expression.
+ */
+function ruleKey(offset: PhpParserTypes.Node): string | null {
+  if (offset.kind === 'string') return (offset as PhpParserTypes.String).value;
+  if (offset.kind !== 'encapsed') return null;
+
+  const placeholder = '\u0000';
+  let template = '';
+  for (const part of (offset as PhpParserTypes.Encapsed).value) {
+    const expression = (part as PhpParserTypes.EncapsedPart).expression;
+    template += expression.kind === 'string' ? (expression as PhpParserTypes.String).value : placeholder;
+  }
+
+  return template
+    .split('.')
+    .map((segment) => (segment.includes(placeholder) ? DYNAMIC_KEY_SEGMENT : segment))
+    .join('.');
 }
 
 /**

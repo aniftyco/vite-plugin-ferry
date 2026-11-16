@@ -2,6 +2,33 @@
 
 `@ferry/forms` types your `FormRequest` classes. Ferry reads each `rules()` method and generates a data-shape type per request, named by the class's verbatim short name.
 
+A request that declares no `rules()` of its own takes its parent's, following `extends` through your request classes until one declares it. The parent's `@ferry` pins come with its rules, and a pin on the child overrides the parent's pin for the same field.
+
+## How `rules()` is read
+
+`rules()` can return an array literal, or a variable holding one. For a variable, ferry starts from the array literal first assigned to it and adds every `$rules['key'] = ...` assigned after it, including inside loops and `if` blocks. A key that interpolates a variable, such as `"overrides.$key"` inside a `foreach`, stands for keys known only at runtime, so its parent types as a record:
+
+```php
+public function rules(): array
+{
+    $rules = ['overrides' => ['required', 'array']];
+
+    foreach (array_keys(config('app.caps')) as $key) {
+        $rules["overrides.$key"] = ['nullable', 'integer'];
+    }
+
+    return $rules;
+}
+```
+
+```ts
+export type UpdateCapsRequest = {
+  overrides: Record<string, number | null>;
+};
+```
+
+A variable built any other way (reassigned, appended to with `$rules[]`, merged with `+=`, keyed by an expression that isn't a string, or first assigned something other than an array literal) can't be read statically.
+
 ## The generated shape
 
 Pass the generated type to `useForm<T>()` to type both the form data and, for free, the `form.errors` keys, which Inertia derives from the same shape via its own `FormDataKeys<T>`, including nested (`profile.bio`) and array (`items.0.id`) paths.
@@ -46,7 +73,7 @@ form.errors['items.0.id'];  // wildcard array paths resolve too
 
 Rule tokens map to leaf types:
 
-- `string`, `email`, `url`, `uuid`, `date` map to `string`.
+- `string`, `email`, `url`, `uuid`, `date`, `ip`, `ipv4`, `ipv6`, `mac_address` map to `string`.
 - `integer`, `numeric`, `decimal` map to `number`.
 - `boolean` and `accepted` map to `boolean`.
 - `in:a,b,c` maps to a string-literal union.
@@ -60,5 +87,7 @@ Dotted keys nest (`profile.bio` becomes `profile: { bio: ... }`) and a `*` segme
 ## Degrade and pins
 
 A field whose only rule ferry can't map to a type (an unrecognized `Rule::` object, a closure, or a rule with no type signal) degrades to `any`, or `unknown` under [`strict`](configuration.md), with a warning. The same `@ferry <field> <type>` docblock [pin](ferry-pins.md) available on `toArray()` and `share()` works here: a tag in the `FormRequest`'s docblock overrides that field's generated type verbatim and clears its degrade warning.
+
+A request whose `rules()` ferry can't read types as `Record<string, any>` (`unknown` under `strict`), with a warning. Its `@ferry` pins still apply: the pinned fields are intersected with that record, as `{ count: number } & Record<string, any>`.
 
 A form with no matching `FormRequest` generates no type, and its `useForm()` call simply omits the generic.

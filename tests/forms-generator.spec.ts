@@ -14,7 +14,7 @@ import {
   type FormEntry,
   type FormInput,
 } from '../src/generators/forms.js';
-import { parseFormRequestRules } from '../src/utils/php-parser.js';
+import { DYNAMIC_KEY_SEGMENT, parseFormRequestRules } from '../src/utils/php-parser.js';
 import { dedent } from './utils.js';
 
 const fixturesDir = join(import.meta.dirname, 'fixtures');
@@ -94,6 +94,51 @@ describe('parseFormRequestRules', () => {
     });
   });
 
+  it('follows a returned variable to its array and the keys assigned onto it, loops included', () => {
+    const php = dedent`
+      <?php
+      class UpdateLimitsRequest {
+          public function rules(Limits $limits): array
+          {
+              $rules = [
+                  'overrides' => ['required', 'array'],
+              ];
+
+              foreach (array_keys($limits->defaults()) as $key) {
+                  $rules["overrides.$key"] = ['nullable', 'integer'];
+                  $rules["meta.{$key}.label"] = 'string';
+              }
+
+              if ($this->user()->isAdmin()) {
+                  $rules['note'] = 'nullable|string';
+              }
+
+              return $rules;
+          }
+      }
+    `;
+
+    expect(parseFormRequestRules(php)).toEqual({
+      overrides: ['required', 'array'],
+      [`overrides.${DYNAMIC_KEY_SEGMENT}`]: ['nullable', 'integer'],
+      [`meta.${DYNAMIC_KEY_SEGMENT}.label`]: ['string'],
+      note: ['nullable', 'string'],
+    });
+  });
+
+  it('returns null when the returned variable is built in a way it cannot follow', () => {
+    const wrap = (body: string) => `<?php class Foo { public function rules(): array { ${body} return $rules; } }`;
+
+    // Reassigned after its first array.
+    expect(parseFormRequestRules(wrap(`$rules = ['a' => 'string']; $rules = ['b' => 'string'];`))).toBeNull();
+    // First assigned something other than an array literal.
+    expect(parseFormRequestRules(wrap(`$rules = parent::rules();`))).toBeNull();
+    // Appended to, compound-assigned, or keyed by an expression.
+    expect(parseFormRequestRules(wrap(`$rules = []; $rules[] = 'string';`))).toBeNull();
+    expect(parseFormRequestRules(wrap(`$rules = []; $rules += ['a' => 'string'];`))).toBeNull();
+    expect(parseFormRequestRules(wrap(`$rules = []; $rules[$key] = 'string';`))).toBeNull();
+  });
+
   it('returns null when no rules() method returning an array literal is found', () => {
     expect(parseFormRequestRules('<?php class Foo {}')).toBeNull();
     expect(
@@ -125,6 +170,64 @@ describe('buildForms — rule → type mapping', () => {
 
     // A bare array rule with no nested keys -> any[]; sometimes -> optional.
     expect(f.tags).toEqual({ type: 'any[]', optional: true });
+  });
+
+  it('maps the ip, ipv4, ipv6 and mac_address rules to string', () => {
+    const { forms, warnings } = buildForms(
+      [
+        {
+          className: 'NetworkRequest',
+          rules: {
+            ip: ['nullable', 'ip'],
+            v4: ['required', 'ipv4'],
+            v6: ['required', 'ipv6'],
+            mac: ['required', 'mac_address'],
+          },
+          annotations: {},
+        },
+      ],
+      false
+    );
+
+    expect(fieldsOf(forms, 'NetworkRequest')).toEqual({
+      ip: { type: 'string | null', optional: false },
+      v4: { type: 'string', optional: false },
+      v6: { type: 'string', optional: false },
+      mac: { type: 'string', optional: false },
+    });
+    expect(warnings).toEqual([]);
+  });
+
+  it('types a key built from a variable as a record of its rule type, off the fixtures', () => {
+    const { forms, warnings } = build();
+    const f = fieldsOf(forms, 'UpdateLimitsRequest');
+
+    // overrides.$key (nullable|integer) -> Record<string, number | null>.
+    expect(f.overrides).toEqual({ type: 'Record<string, number | null>', optional: false });
+    expect(f.note).toEqual({ type: 'string | null', optional: false });
+    expect(f.address).toEqual({ type: 'string', optional: false });
+    expect(warnings.some((w) => w.includes('UpdateLimitsRequest'))).toBe(false);
+  });
+
+  it('intersects a dynamic-key record with the static keys beside it', () => {
+    const { forms } = buildForms(
+      [
+        {
+          className: 'LimitsRequest',
+          rules: {
+            'limits.default': ['required', 'integer'],
+            [`limits.${DYNAMIC_KEY_SEGMENT}`]: ['nullable', 'integer'],
+          },
+          annotations: {},
+        },
+      ],
+      false
+    );
+
+    expect(fieldsOf(forms, 'LimitsRequest').limits).toEqual({
+      type: '{ default: number } & Record<string, number | null>',
+      optional: false,
+    });
   });
 
   it('expands nested and wildcard keys into nested objects and arrays', () => {
@@ -230,7 +333,26 @@ describe('buildForms — rule → type mapping', () => {
 
   it('falls a form whose rules() cannot be analyzed back to a Record type with a warning', () => {
     const { forms, warnings } = buildForms([{ className: 'WeirdRequest', rules: null, annotations: {} }], false);
-    expect(forms.WeirdRequest).toEqual({ kind: 'fallback', record: 'any' });
+    expect(forms.WeirdRequest).toEqual({ kind: 'fallback', record: 'any', fields: {} });
+    expect(warnings[0]).toContain('WeirdRequest');
+  });
+
+  it('keeps the @ferry pins of a form whose rules() cannot be analyzed', () => {
+    const { forms, warnings } = buildForms(
+      [{ className: 'WeirdRequest', rules: null, annotations: { priority: 'Priority', count: 'number' } }],
+      true,
+      enums,
+      knownEnums
+    );
+
+    expect(forms.WeirdRequest).toEqual({
+      kind: 'fallback',
+      record: 'unknown',
+      fields: {
+        priority: { type: 'PriorityValue', optional: false },
+        count: { type: 'number', optional: false },
+      },
+    });
     expect(warnings[0]).toContain('WeirdRequest');
   });
 });
@@ -240,6 +362,41 @@ describe('collectFormInputs', () => {
     const names = formInputs().map((i) => i.className);
     expect(names).toContain('StoreUserRequest');
     expect(names).toContain('UpdatePostRequest');
+  });
+
+  it("reads the parent request's rules() and pins when a request declares no rules() of its own", () => {
+    const { forms, warnings } = build();
+
+    // DeletePostRequest extends Admin/SecureDeleteRequest; its own pin on confirm wins over the parent's.
+    expect(fieldsOf(forms, 'DeletePostRequest')).toEqual({
+      password: { type: 'string', optional: false },
+      scope: { type: "'all' | 'mine'", optional: false },
+      confirm: { type: 'boolean', optional: false },
+    });
+
+    // ForceDeletePostRequest -> DeletePostRequest -> SecureDeleteRequest: the chain is followed.
+    expect(fieldsOf(forms, 'ForceDeletePostRequest')).toEqual(fieldsOf(forms, 'DeletePostRequest'));
+    expect(warnings.some((w) => w.includes('DeletePostRequest'))).toBe(false);
+  });
+
+  it('falls back when no request in the extends chain declares rules()', () => {
+    const dir = mkdtempSync(join(repoRoot, 'ferry-requests-'));
+    try {
+      writeFileSync(join(dir, 'OrphanRequest.php'), '<?php class OrphanRequest extends FormRequest {}', 'utf8');
+      writeFileSync(join(dir, 'LoopARequest.php'), '<?php class LoopARequest extends LoopBRequest {}', 'utf8');
+      writeFileSync(join(dir, 'LoopBRequest.php'), '<?php class LoopBRequest extends LoopARequest {}', 'utf8');
+
+      const inputs = collectFormInputs({ requestsDir: dir, cwd: dir });
+      expect(inputs.map((i) => [i.className, i.rules])).toEqual(
+        expect.arrayContaining([
+          ['OrphanRequest', null],
+          ['LoopARequest', null],
+          ['LoopBRequest', null],
+        ])
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('returns no forms when the requests directory is absent', () => {
@@ -281,6 +438,21 @@ describe('generateFormsDtsBlock', () => {
 
     const block = generateFormsDtsBlock(forms, new Set(), new Set(['Priority']));
     expect(block).toContain(`import { PriorityValue } from '@ferry/enums';`);
+  });
+
+  it('renders a pinned fallback form as its pins intersected with the fallback record', () => {
+    const forms: Record<string, FormEntry> = {
+      WeirdRequest: { kind: 'fallback', record: 'any', fields: { count: { type: 'number', optional: false } } },
+      OpaqueRequest: { kind: 'fallback', record: 'unknown', fields: {} },
+    };
+
+    const block = generateFormsDtsBlock(forms);
+    expect(block).toContain(dedent`
+      export type WeirdRequest = {
+          count: number;
+        } & Record<string, any>;
+    `);
+    expect(block).toContain('export type OpaqueRequest = Record<string, unknown>;');
   });
 
   it('emits an empty declare module block when there are no forms', () => {
@@ -491,6 +663,39 @@ describe('a bare enum-name form pin resolves to its value union end-to-end (tsc 
       // @ts-expect-error 99 is outside the PriorityValue backing-value union.
       req.priority = 99;
     `;
+    const { ok, output } = typecheck(ambient, consumer);
+    expect(ok, `tsc reported errors:\n${output}`).toBe(true);
+  });
+});
+
+describe('dynamic-key and pinned fallback forms type-check (tsc --noEmit)', () => {
+  const { forms: built } = build();
+  const forms: Record<string, FormEntry> = {
+    UpdateLimitsRequest: built.UpdateLimitsRequest,
+    ...buildForms([{ className: 'WeirdRequest', rules: null, annotations: { count: 'number' } }], false).forms,
+  };
+
+  const ambient = assembleAmbientTypes({ blocks: [generateFormsDtsBlock(forms)] });
+
+  it('accepts runtime keys of the record type and rejects a wrong value or a wrong pinned type', () => {
+    const consumer = dedent`
+      import type { UpdateLimitsRequest, WeirdRequest } from '@ferry/forms';
+
+      const limits: UpdateLimitsRequest = {
+        overrides: { apps: 3, domains: null },
+        note: null,
+        address: '127.0.0.1',
+      };
+
+      // @ts-expect-error an override is number | null, not string
+      limits.overrides.apps = 'three';
+
+      const weird: WeirdRequest = { count: 1, anything: 'else' };
+
+      // @ts-expect-error the count pin is number, not string
+      weird.count = 'one';
+    `;
+
     const { ok, output } = typecheck(ambient, consumer);
     expect(ok, `tsc reported errors:\n${output}`).toBe(true);
   });
